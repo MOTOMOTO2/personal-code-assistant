@@ -34,6 +34,11 @@ export interface CompletionRequest {
   count?: number;
   /** Beam width for the n-gram search. */
   beamWidth?: number;
+  /**
+   * Stop extending a suggestion once the longest matching n-gram context falls
+   * below this order. Higher means shorter, more confident suggestions.
+   */
+  minEvidenceOrder?: number;
   /** Add transformer rescoring. Costs ~10-100ms depending on model size. */
   neural?: boolean;
   /** Use the code index to add retrieval features. */
@@ -98,14 +103,40 @@ export class CompletionEngine {
   private readonly bundle: Bundle;
   /** Cached retrieval terms, keyed by file path, so repeat keystrokes are free. */
   private retrievalCache = new Map<string, { terms: Set<string>; at: number }>();
+  /**
+   * Cached locality term counts. Tokenising the 4 KB window around the cursor is
+   * the single most expensive per-keystroke step, and consecutive keystrokes see
+   * a near-identical window, so it is re-derived only when the buffer moves
+   * meaningfully.
+   */
+  private localCache: { key: string; length: number; counts: Map<string, number> } | null = null;
 
   constructor(bundle: Bundle) {
     this.bundle = bundle;
   }
 
+  /**
+   * Page in the models the keystroke path needs. Loading the n-gram tables costs
+   * tens of milliseconds, which would otherwise be charged to the first
+   * completion and make the timings meaningless. The daemon calls this at
+   * startup; the CLI calls it before starting its timer.
+   */
+  warm(opts: { neural?: boolean; retrieval?: boolean } = {}): void {
+    void this.bundle.tokenizer;
+    void this.bundle.ngram;
+    void this.bundle.reranker;
+    void this.bundle.embeddings;
+    if (opts.neural) void this.bundle.neural;
+    if (opts.retrieval) void this.bundle.index;
+  }
+
   complete(req: CompletionRequest): CompletionResult {
     const t0 = performance.now();
-    const maxTokens = req.maxTokens ?? 10;
+    // Defaults chosen by sweeping held-out line completion (see bench/sweep.mjs):
+    // 8 tokens sits at the knee of the utility curve, and requiring a
+    // full-order context match buys ~8 points of "suggestion fully correct" for
+    // almost no loss in characters saved.
+    const maxTokens = req.maxTokens ?? 8;
     const count = req.count ?? 3;
     const beamWidth = req.beamWidth ?? 5;
     const singleLine = req.singleLine !== false;
@@ -121,7 +152,7 @@ export class CompletionEngine {
     const history = encoded.slice(Math.max(0, encoded.length - HISTORY_TOKENS));
 
     const localText = `${tail}\n${(req.suffix ?? "").slice(0, LOCAL_WINDOW)}`;
-    const localCounts = countTerms(localText);
+    const localCounts = this.localTermCounts(req.filePath ?? "<buffer>", localText);
     const retrievalTerms = req.retrieval ? this.retrievalTerms(req, localText) : null;
 
     // --- stage 1: propose -------------------------------------------------
@@ -130,7 +161,7 @@ export class CompletionEngine {
       beamWidth,
       maxTokens,
       singleLine,
-      partial,
+      minEvidenceOrder: req.minEvidenceOrder ?? ngram.order,
     });
     const tPropose = performance.now();
 
@@ -161,6 +192,7 @@ export class CompletionEngine {
 
       const f = emptyFeatures();
       f[featureIndex("ngramLogProb")] = clamp(meanLogProb / 8 + 1, -1, 1);
+      f[featureIndex("ngramLogProbSum")] = clamp(beam.logProb / 24 + 1, -1, 1);
       f[featureIndex("neuralLogProb")] = neuralLp === null ? 0 : clamp(neuralLp / 8 + 1, -1, 1);
       f[featureIndex("modelsAgree")] =
         ngramTop3.has(firstToken) && neuralTop3.has(firstToken) ? 1 : 0;
@@ -224,9 +256,10 @@ export class CompletionEngine {
   ): Array<{ id: number; logProb: number }> {
     const tokenizer = this.bundle.tokenizer;
     const ngram = this.bundle.ngram;
+    const ctx = ngram.contextFor(history);
     // Ask for a wide pool: under a partial-word constraint most of the top
     // proposals get filtered out.
-    const pool = ngram.predict(history, partial.length > 0 ? 400 : Math.max(want, 24), 600);
+    const pool = ngram.predictIn(ctx, partial.length > 0 ? 400 : Math.max(want, 24), 600);
     const out: Array<{ id: number; logProb: number }> = [];
     const seen = new Set<number>();
     for (const cand of pool) {
@@ -245,7 +278,7 @@ export class CompletionEngine {
         const id = tokenizer.idOf(word);
         if (id === undefined || seen.has(id)) continue;
         seen.add(id);
-        out.push({ id, logProb: ngram.logProb(history, id) });
+        out.push({ id, logProb: ngram.logProbIn(ctx, id) });
       }
       out.sort((a, b) => b.logProb - a.logProb);
     }
@@ -255,7 +288,7 @@ export class CompletionEngine {
   private beamSearch(
     history: number[],
     first: Array<{ id: number; logProb: number }>,
-    opts: { beamWidth: number; maxTokens: number; singleLine: boolean; partial: string },
+    opts: { beamWidth: number; maxTokens: number; singleLine: boolean; minEvidenceOrder: number },
   ): Beam[] {
     const tokenizer = this.bundle.tokenizer;
     const ngram = this.bundle.ngram;
@@ -278,8 +311,15 @@ export class CompletionEngine {
           finished.push(beam);
           continue;
         }
-        const ctx = [...history, ...beam.tokens];
-        const preds = ngram.predict(ctx, 6, 64);
+        const ctx = ngram.contextFor([...history, ...beam.tokens]);
+        // Once the longest matching context is this short the model is just
+        // backing off to generic code, and continuing produces the rambling,
+        // plausible-looking nonsense that makes a completion feel untrustworthy.
+        if (ctx.matchedOrder < opts.minEvidenceOrder) {
+          finished.push({ ...beam, done: true });
+          continue;
+        }
+        const preds = ngram.predictIn(ctx, 6, 64);
         if (preds.length === 0) {
           finished.push({ ...beam, done: true });
           continue;
@@ -311,6 +351,22 @@ export class CompletionEngine {
     }
     for (const beam of beams) if (!finished.includes(beam)) finished.push(beam);
     return dedupeBeams([...finished, ...beams]);
+  }
+
+  /**
+   * Term frequencies for the window around the cursor. Reused while the cursor
+   * stays in the same file and the window has not shifted by more than a few
+   * tokens' worth of text - the counts are a locality prior, so a slightly stale
+   * window changes nothing about the ranking.
+   */
+  private localTermCounts(key: string, localText: string): Map<string, number> {
+    const cached = this.localCache;
+    if (cached && cached.key === key && Math.abs(cached.length - localText.length) < 120) {
+      return cached.counts;
+    }
+    const counts = countTerms(localText);
+    this.localCache = { key, length: localText.length, counts };
+    return counts;
   }
 
   /** Terms from semantically related chunks, cached per file. */

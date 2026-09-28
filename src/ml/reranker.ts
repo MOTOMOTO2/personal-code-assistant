@@ -7,7 +7,8 @@ import { readJsonGz, writeJsonGz } from "../util/io.js";
  */
 export const FEATURES = [
   "bias",
-  "ngramLogProb", // statistical LM score, scaled
+  "ngramLogProb", // statistical LM score, mean per token, scaled
+  "ngramLogProbSum", // statistical LM score, summed over the whole suggestion
   "neuralLogProb", // transformer score, scaled (0 when the model is absent)
   "modelsAgree", // both models rank it top-3
   "ngramRank", // 1/(1+rank) from the n-gram proposal order
@@ -73,10 +74,15 @@ export class Reranker {
       // assistant already ranks well: trust the language models, mildly prefer
       // longer and identifier-shaped completions.
       this.weights[featureIndex("ngramLogProb")] = 1.0;
+    // Summed log-probability is what makes the length trade-off honest: each
+    // extra token multiplies in a probability below 1, so a longer suggestion
+    // only wins when every token in it is genuinely likely.
+    this.weights[featureIndex("ngramLogProbSum")] = 1.2;
       this.weights[featureIndex("neuralLogProb")] = 0.6;
       this.weights[featureIndex("modelsAgree")] = 0.3;
       this.weights[featureIndex("ngramRank")] = 0.4;
-      this.weights[featureIndex("charLength")] = 0.05;
+      // Length is not intrinsically good; ngramLogProbSum already prices it.
+    this.weights[featureIndex("charLength")] = 0.0;
       this.weights[featureIndex("isIdentifier")] = 0.1;
       this.weights[featureIndex("localFileHits")] = 0.3;
       this.weights[featureIndex("retrievalHits")] = 0.25;

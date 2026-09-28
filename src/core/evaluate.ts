@@ -157,7 +157,14 @@ export function evalNeuralAndHybrid(
 export function evalLineCompletion(
   bundle: Bundle,
   texts: Array<{ path: string; text: string }>,
-  opts: { samples?: number; neural?: boolean; seed?: number } = {},
+  opts: {
+    samples?: number;
+    neural?: boolean;
+    seed?: number;
+    maxTokens?: number;
+    minEvidenceOrder?: number;
+    beamWidth?: number;
+  } = {},
 ): LineMetrics {
   const samples = opts.samples ?? 200;
   const engine = new CompletionEngine(bundle);
@@ -216,7 +223,11 @@ export function evalLineCompletion(
       neural: opts.neural === true,
       retrieval: false,
       count: 1,
-      maxTokens: 10,
+      maxTokens: opts.maxTokens ?? 8,
+      beamWidth: opts.beamWidth ?? 5,
+      ...(opts.minEvidenceOrder !== undefined
+        ? { minEvidenceOrder: opts.minEvidenceOrder }
+        : {}),
     });
     latencies.push(performance.now() - t0);
     taken++;

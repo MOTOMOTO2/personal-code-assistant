@@ -39,6 +39,27 @@ export interface NgramCandidate {
   logProb: number;
 }
 
+/** Per-order state for one resolved history. `null` means the context is unseen. */
+type NgramLevel = {
+  succ: Map<number, number>;
+  denom: number;
+  D: number;
+  /** Backoff mass reserved for the next lower order. */
+  lambda: number;
+  sorted: { ids: Int32Array; counts: Float64Array } | null;
+} | null;
+
+export interface NgramContext {
+  levels: NgramLevel[];
+  uniform: number;
+  /**
+   * Highest order whose context was actually observed in training. A value of 1
+   * means only the unigram matched, i.e. the model has no real evidence about
+   * what comes next - useful as a stopping signal during generation.
+   */
+  matchedOrder: number;
+}
+
 export interface NgramModelData {
   version: 1;
   order: number;
@@ -142,27 +163,58 @@ export class NgramModel {
     return key;
   }
 
+  /**
+   * Resolve a history into per-order state once, so that scoring many candidates
+   * against it is a handful of map lookups each.
+   *
+   * This exists because the naive version rebuilt every context key inside the
+   * per-candidate loop: scoring 600 candidates meant 2400 string concatenations
+   * and 2400 map lookups that were all identical across candidates. Hoisting
+   * them is the difference between ~70ms and sub-millisecond proposals.
+   */
+  contextFor(history: ArrayLike<number>): NgramContext {
+    const levels: NgramLevel[] = [];
+    let matchedOrder = 0;
+    for (let k = 1; k <= this.order; k++) {
+      const store = this.orders[k - 1];
+      const ctx = this.ctxKeyFor(history, k);
+      const denom = store.total.get(ctx);
+      if (denom === undefined || denom <= 0) {
+        levels.push(null);
+        continue;
+      }
+      const succ = store.map.get(ctx)!;
+      const D = store.discount;
+      levels.push({ succ, denom, D, lambda: (D * succ.size) / denom, sorted: this.sorted[k - 1].get(ctx) ?? null });
+      matchedOrder = k;
+    }
+    return { levels, uniform: 1 / Math.max(this.vocabSize, 2), matchedOrder };
+  }
+
+  /** log P(next | ctx) for a resolved context. */
+  logProbIn(ctx: NgramContext, next: number): number {
+    return Math.log(Math.max(this.probIn(ctx, next), 1e-12));
+  }
+
+  probIn(ctx: NgramContext, next: number): number {
+    let p = ctx.uniform;
+    // Walk upward from the unigram so each order interpolates the one below it.
+    for (let k = 0; k < ctx.levels.length; k++) {
+      const level = ctx.levels[k];
+      if (level === null) continue; // unseen context: pass the lower order through
+      const c = level.succ.get(next) ?? 0;
+      p = Math.max(c - level.D, 0) / level.denom + level.lambda * p;
+    }
+    return p;
+  }
+
   /** log P(next | history) under the interpolated Kneser-Ney mixture. */
   logProb(history: ArrayLike<number>, next: number): number {
     return Math.log(Math.max(this.prob(history, next), 1e-12));
   }
 
   prob(history: ArrayLike<number>, next: number): number {
-    const uniform = 1 / Math.max(this.vocabSize, 2);
-    let p = uniform;
-    // Walk upward from the unigram so each order interpolates the one below it.
-    for (let k = 1; k <= this.order; k++) {
-      const store = this.orders[k - 1];
-      const ctx = this.ctxKeyFor(history, k);
-      const denom = store.total.get(ctx);
-      if (denom === undefined || denom <= 0) continue; // unseen context: pass through
-      const succ = store.map.get(ctx)!;
-      const D = store.discount;
-      const c = succ.get(next) ?? 0;
-      const lambda = (D * succ.size) / denom;
-      p = Math.max(c - D, 0) / denom + lambda * p;
-    }
-    return p;
+    return this.probIn(this.contextFor(history), next);
   }
 
   /**
@@ -171,11 +223,14 @@ export class NgramModel {
    * them), then every candidate is rescored with the full interpolated mixture.
    */
   predict(history: ArrayLike<number>, topK = 12, maxCandidates = 256): NgramCandidate[] {
+    return this.predictIn(this.contextFor(history), topK, maxCandidates);
+  }
+
+  predictIn(ctx: NgramContext, topK = 12, maxCandidates = 256): NgramCandidate[] {
     const seen = new Set<number>();
     const candidates: number[] = [];
-    for (let k = this.order; k >= 1 && candidates.length < maxCandidates; k--) {
-      const ctx = this.ctxKeyFor(history, k);
-      const entry = this.sorted[k - 1].get(ctx);
+    for (let k = ctx.levels.length - 1; k >= 0 && candidates.length < maxCandidates; k--) {
+      const entry = ctx.levels[k]?.sorted;
       if (!entry) continue;
       for (let i = 0; i < entry.ids.length && candidates.length < maxCandidates; i++) {
         const id = entry.ids[i];
@@ -186,7 +241,7 @@ export class NgramModel {
     }
     const scored: NgramCandidate[] = [];
     for (const id of candidates) {
-      scored.push({ id, logProb: this.logProb(history, id) });
+      scored.push({ id, logProb: this.logProbIn(ctx, id) });
     }
     scored.sort((a, b) => b.logProb - a.logProb);
     return scored.slice(0, topK);

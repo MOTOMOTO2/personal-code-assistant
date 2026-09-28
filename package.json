@@ -16,10 +16,16 @@
     "test": "npm run build && node --test dist-test/",
     "pca": "node dist/cli.js"
   },
-  "keywords": ["machine-learning", "code-completion", "language-model", "claude", "developer-tools"],
+  "keywords": [
+    "machine-learning",
+    "code-completion",
+    "language-model",
+    "claude",
+    "developer-tools"
+  ],
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.70.0"
+    "@anthropic-ai/sdk": "^0.128.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -43,6 +43,9 @@ const DECL_PATTERNS: Array<{ re: RegExp; group: number }> = [
   { re: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\(|function|<)/, group: 1 },
   // Java/C#/C++ methods and top-level C functions: `Type name(...) {`
   { re: /^(?:public|private|protected|internal|static|virtual|override|inline|extern|\s)*[A-Za-z_][\w:<>,*&\s[\]]*\s+([A-Za-z_][\w]*)\s*\([^;]*\)\s*(?:const\s*)?\{\s*$/, group: 1 },
+  // TS/JS class members: `private async fetchAll(x: T): Promise<U> {`. Written
+  // last because it is the loosest pattern; RESERVED_NAMES rejects `if (...) {`.
+  { re: /^\s*(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+|override\s+|abstract\s+)*(?:async\s+)?(?:get\s+|set\s+)?\*?\s*([A-Za-z_$][\w$]*)\s*(?:<[^<>()]*>)?\s*\([^;]*\)\s*(?::\s*[^{;=]+)?\s*\{\s*$/, group: 1 },
 ];
 
 /** Indentation depth in visual columns (tabs count as 4). */
