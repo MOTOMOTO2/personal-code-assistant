@@ -1,0 +1,28 @@
+{
+  "name": "personal-code-assistant",
+  "version": "0.1.0",
+  "description": "A local, trainable ML coding assistant: from-scratch models that learn your codebase, plus Claude for deep reasoning.",
+  "type": "module",
+  "bin": {
+    "pca": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist-test/",
+    "pca": "node dist/cli.js"
+  },
+  "keywords": ["machine-learning", "code-completion", "language-model", "claude", "developer-tools"],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}

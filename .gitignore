@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-test/
+*.tsbuildinfo
+
+# Local model + index artifacts (trained per-machine, can be large)
+.pca/
+*.pcam
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+editors/vscode/out/
+editors/vscode/*.vsix
