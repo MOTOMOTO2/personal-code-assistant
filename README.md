@@ -171,6 +171,40 @@ interface is the same from day one, and the fraction of it that Claude has to
 answer goes down over time.** It does not reach zero. On questions that need
 real reasoning about code it has never seen, it should not.
 
+### Measuring whether it is actually working
+
+`pca eval` reports it, because a claim about compounding that nobody measures is
+a claim you should not believe:
+
+```
+What the local half could handle on its own
+  questions            4
+  routed local         25.0%  (mean p(claude) 0.59)
+  covered by memory    25.0%  (another stored answer already covers it)
+  local answer kinds   locate 3 · memory 1
+```
+
+Every remembered question is replayed through the router and the local answerer
+**with its own answer held out of memory**. Scoring a question against a store
+that contains its own answer would report 100% and mean nothing; holding it out
+asks the question that matters — does what this assistant already knows cover
+the next thing you ask?
+
+It says the local half *would answer*, not that it would answer as well as
+Claude. Those are different claims, and only the first is measurable without a
+human reading the output. The number to watch is whether it climbs as memory
+fills.
+
+This metric earned its keep immediately: the first run reported 75% routed local
+while the answer kinds beside it showed only one answer actually coming from
+memory. The inconsistency was real — the router was reading weak embedding
+similarity as a memory hit, because SIF cosine between any two texts from one
+codebase has a floor well above zero. `retrievalTop` and `retrievalCoverage` had
+the same problem from the other direction: both sit near 1.0 for any question
+about a repository you have indexed, so their weights were acting as a second
+bias term and drowning out question shape. Both are fixed, and the two numbers
+now agree.
+
 ---
 
 ## What is actually learned from your code
@@ -581,7 +615,7 @@ src/
   server/      loopback daemon (completion, search, chat, train)
   web/         the browser chat client, one self-contained page
   commands/    CLI command implementations
-test/          60 tests: gradient checks, round-trips, retrieval, chat, end-to-end
+test/          62 tests: gradient checks, round-trips, retrieval, chat, end-to-end
 bench/         latency, hyper-parameter sweeps
 editors/vscode inline-completion extension
 ```
@@ -632,7 +666,7 @@ real index, not by the unit tests, which is why that case is now one.
 ## Testing
 
 ```bash
-npm test                              # 60 tests
+npm test                              # 62 tests
 node bench/latency.mjs                # warm-path latency distribution
 node bench/sweep.mjs                  # suggestion length / evidence sweep
 node bench/tune-locality.mjs          # locality weight sweep
@@ -647,11 +681,13 @@ HTTP including auth rejection and malformed input.
 The chat layer is tested the same way, against a real trained fixture rather
 than mocks: that a remembered answer is recalled by a paraphrase *and not* by an
 unrelated question, that remembered answers actually reach the corpus and the
-index, that escalating a turn moves the router's weights and persists them, that
-the file watcher retrains on a genuine filesystem event, and that the daemon
-serves the UI, streams a turn, rejects a non-loopback `Host`, and retrains on
-request. The Claude path runs against an injected fake backend, so the whole
-suite passes offline with no API key.
+index, that routing follows question shape and only follows memory when the
+recall is real, that routing coverage is measured leave-one-out so an answer
+cannot recall itself, that escalating a turn moves the router's weights and
+persists them, that the file watcher retrains on a genuine filesystem event, and
+that the daemon serves the UI, streams a turn, rejects a non-loopback `Host`,
+and retrains on request. The Claude path runs against an injected fake backend,
+so the whole suite passes offline with no API key.
 
 ---
 
@@ -705,12 +741,12 @@ Recorded because they were judgement calls, not requirements:
   preferences until you have used it for a while.
 - **The router's priors have not been swept**, unlike the reranker's — that
   needs a corpus of real routing decisions, which only exists after the tool has
-  been used. They are reasoned defaults that start biased towards Claude, and
-  they move as you correct them.
-- **No measurement yet of how far memory moves the local share.** The mechanism
-  is tested; the *effect* needs a few weeks of real use to quantify, and quoting
-  a number from a synthetic fixture would be meaningless. `pca stats --router`
-  shows the running local/Claude split so you can watch it yourself.
+  been used. They are reasoned defaults, sanity-checked against the routing
+  eval on a handful of real questions, and they move as you correct them.
+- **No long-run number for how far memory moves the local share.** The metric
+  exists (`pca eval`, above) and the mechanism is tested, but quoting a headline
+  figure from four seeded answers would be meaningless. It needs weeks of real
+  use; `pca eval` and `pca stats --router` let you watch your own.
 - Memory recall is lexical overlap plus SIF-embedding cosine, which is adequate
   for hundreds of answers. At tens of thousands it would want a real ANN index.
 - Chat has no tool use: it reads your codebase and answers, but it does not edit

@@ -1,5 +1,7 @@
 import { Bundle } from "./bundle.js";
 import { CompletionEngine } from "./complete.js";
+import { Lesson, LessonStore } from "../chat/memory.js";
+import { LocalAssistant, buildTurnContext } from "../chat/local.js";
 import { Rng } from "../util/rng.js";
 import { progress, progressDone } from "../util/log.js";
 
@@ -43,6 +45,68 @@ export interface EvalReport {
   hybrid: TokenMetrics | null;
   line: LineMetrics;
   valFiles: number;
+}
+
+export interface RoutingMetrics {
+  /** Questions evaluated: one per answer in memory. */
+  questions: number;
+  /** Fraction the router would keep on the local models. */
+  local: number;
+  /** Mean router probability that a question needs Claude. */
+  meanPClaude: number;
+  /** What the local half would actually have said, by answer kind. */
+  byKind: Record<string, number>;
+  /**
+   * Fraction answerable from *other* stored answers, with this one held out.
+   * The honest measure of whether memory generalises rather than memorises.
+   */
+  coveredByOthers: number;
+}
+
+/**
+ * Replay every remembered question through the router and the local answerer,
+ * leaving that question's own answer out of memory.
+ *
+ * This is the metric for the part of the system that is supposed to compound.
+ * Scoring a question against a store that contains its own answer would report
+ * 100% and mean nothing; holding it out asks the question that matters - does
+ * what this assistant already knows cover the next thing you will ask?
+ *
+ * Note what it is not: a quality measure. It says the local half would answer,
+ * not that the answer would be as good as Claude's. Those are different claims
+ * and only the first one is measurable without a human reading the output.
+ */
+export function evalRouting(bundle: Bundle, lessons: Lesson[]): RoutingMetrics {
+  const byKind: Record<string, number> = {};
+  if (lessons.length === 0) {
+    return { questions: 0, local: 0, meanPClaude: 0, byKind, coveredByOthers: 0 };
+  }
+  const local = new LocalAssistant(bundle);
+  const router = bundle.router;
+  let localCount = 0;
+  let pSum = 0;
+  let covered = 0;
+
+  for (let i = 0; i < lessons.length; i++) {
+    progress(`routing ${i + 1}/${lessons.length}`);
+    const heldOut = new LessonStore(lessons.filter((_, j) => j !== i));
+    const ctx = buildTurnContext(bundle, heldOut, lessons[i].question);
+    const p = router.probability(ctx.features);
+    pSum += p;
+    if (p < 0.5) localCount++;
+    const answer = local.answer(ctx);
+    byKind[answer.kind] = (byKind[answer.kind] ?? 0) + 1;
+    if (answer.kind === "memory") covered++;
+  }
+  progressDone();
+
+  return {
+    questions: lessons.length,
+    local: localCount / lessons.length,
+    meanPClaude: pSum / lessons.length,
+    byKind,
+    coveredByOthers: covered / lessons.length,
+  };
 }
 
 /** Next-token metrics for the n-gram model over held-out documents. */

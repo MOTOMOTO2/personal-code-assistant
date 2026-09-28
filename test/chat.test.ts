@@ -18,9 +18,11 @@ import {
   buildTurnContext,
   isCodeContinuation,
   isStrongRecall,
+  recallStrength,
 } from "../src/chat/local.js";
 import { Router, routerFeatureIndex } from "../src/ml/router.js";
 import { StreamOptions, StreamResult } from "../src/llm/claude.js";
+import { evalRouting } from "../src/core/evaluate.js";
 import { loadCorpus, trainProject } from "../src/core/train.js";
 import { isTrainableChange, startWatcher } from "../src/core/watch.js";
 import { createDaemon } from "../src/server/daemon.js";
@@ -273,6 +275,73 @@ test("the router learns from corrections and stays interpretable", (t) => {
     Math.abs(described[0].weight) >= Math.abs(described[described.length - 1].weight),
     "describe() should sort by magnitude",
   );
+});
+
+test("routing reflects question shape, and memory only when it is real", (t) => {
+  const bundle = setupProject(t);
+  appendLesson(
+    bundle,
+    lesson(
+      "why does the upload retry twice?",
+      "Because the caller retries once and `retryFailedUpload` retries again at src/uploader.ts:2.",
+    ),
+  );
+  const store = loadLessons(bundle);
+  const router = bundle.router;
+  const p = (question: string, lessons = store) =>
+    router.probability(buildTurnContext(bundle, lessons, question).features);
+
+  // A lookup the index can serve stays local; reasoning and edits do not.
+  assert.ok(p("where is attemptUpload defined") < 0.5, "a lookup should stay local");
+  assert.ok(p("add a backoff to the uploader") > 0.5, "an edit needs Claude");
+  assert.ok(
+    p("why does isExpired compare to now?") > 0.5,
+    "a why-question with no memory needs Claude, however good the retrieval hit is",
+  );
+  // The same shape of question, once it has been answered, does not.
+  assert.ok(p("why does the upload retry twice?") < 0.5, "a real memory hit should pull local");
+
+  // A weak similarity must contribute nothing: SIF cosine over one codebase has
+  // a floor well above zero, and a raw score would make every question look
+  // like a partial hit.
+  const weak = store.recall("session expiry semantics", {
+    tokenizer: bundle.tokenizer,
+    embeddings: bundle.embeddings,
+  });
+  assert.equal(recallStrength(weak[0]), 0, "a sub-threshold recall must not pull local");
+  const exact = store.recall("why does the upload retry twice?", { tokenizer: bundle.tokenizer });
+  assert.ok(recallStrength(exact[0]) > 0.5, "an exact hit should pull hard");
+});
+
+test("routing coverage is measured leave-one-out, not against itself", (t) => {
+  const bundle = setupProject(t);
+  const one = lesson(
+    "why does the upload retry twice?",
+    "Because the caller retries once and `retryFailedUpload` retries again at src/uploader.ts:2.",
+  );
+  appendLesson(bundle, one);
+
+  // A single answer cannot cover its own question - that would be the metric
+  // measuring storage rather than coverage.
+  const alone = evalRouting(bundle, loadLessons(bundle).lessons);
+  assert.equal(alone.questions, 1);
+  assert.equal(alone.coveredByOthers, 0, "a lesson must not be allowed to recall itself");
+
+  // A paraphrase of it, though, is covered by the original.
+  appendLesson(
+    bundle,
+    lesson(
+      "why does the upload retry two times?",
+      "The caller retries once, and `retryFailedUpload` retries again at src/uploader.ts:2.",
+    ),
+  );
+  const pair = evalRouting(bundle, loadLessons(bundle).lessons);
+  assert.equal(pair.questions, 2);
+  assert.ok(pair.coveredByOthers > 0, "a paraphrase should be covered by the original");
+  assert.ok(pair.local > 0, "and therefore routed locally");
+  // The report must be internally consistent: anything counted as covered was
+  // answered from memory.
+  assert.ok((pair.byKind.memory ?? 0) >= pair.coveredByOthers * pair.questions);
 });
 
 test("a chat session routes, remembers, and learns from an escalation", async (t) => {

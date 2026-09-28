@@ -51,7 +51,7 @@ const RRF_SCALE = 30;
 const LOCATE_RE =
   /\b(where|which file|find|locate|show me|list|what calls|who calls|defined|definition|look ?up)\b/i;
 const REASON_RE =
-  /\b(why|how come|how does|how do|explain|should|trade-?off|difference|reason|cause|understand|design|architecture|better)\b/i;
+  /\b(why|how (come|does|do|did|was|were|is|are)|explain|should|trade-?off|difference|reason|cause|understand|design|architecture|better)\b/i;
 const EDIT_RE =
   /\b(write|add|create|implement|fix|refactor|rename|change|update|remove|delete|migrate|convert|generate|rewrite|optimise|optimize)\b/i;
 const NEIGHBORS_RE =
@@ -100,18 +100,25 @@ export function routeFeatures(
     f[routerFeatureIndex(name)] = v;
   };
   set("bias", 1);
-  set("memoryTop", recalls[0]?.score ?? 0);
-  set("memorySecond", recalls[1]?.score ?? 0);
+  // A stored answer answers a question; it does not do a piece of work. Asking
+  // for a change is a request for new output, so memory must not pull an edit
+  // request local however closely it matches something already discussed.
+  const edit = EDIT_RE.test(question);
+  set("memoryTop", edit ? 0 : recallStrength(recalls[0]));
+  set("memorySecond", edit ? 0 : recallStrength(recalls[1]));
   set("retrievalTop", Math.min(1, (hits[0]?.score ?? 0) * RRF_SCALE));
   set("retrievalCoverage", coverage);
   set("locateShape", LOCATE_RE.test(question) ? 1 : 0);
   set("reasonShape", REASON_RE.test(question) ? 1 : 0);
-  set("editShape", EDIT_RE.test(question) ? 1 : 0);
+  set("editShape", edit ? 1 : 0);
   set("hasCodeBlock", question.includes("```") || looksLikeCode ? 1 : 0);
   // Scaled to roughly 0..1 over the range of questions people actually type.
   set("lengthTokens", Math.min(1, question.split(/\s+/).length / 40));
   return f;
 }
+
+/** Similarity at which a stored answer is worth replaying verbatim. */
+export const REPLAY_THRESHOLD = 0.45;
 
 /**
  * Whether a recalled answer is close enough to replay as *the* answer.
@@ -122,8 +129,29 @@ export function routeFeatures(
  * identifier by name.
  */
 export function isStrongRecall(recall: Recall): boolean {
-  if (recall.score < 0.45) return false;
+  if (recall.score < REPLAY_THRESHOLD) return false;
   return recall.matchedTerms >= 2 || recall.score >= 0.9;
+}
+
+/**
+ * Recall similarity rescaled to "how much this should pull the turn local",
+ * 0 below the replay threshold and 1 at a perfect match.
+ *
+ * The raw score is the wrong thing to hand the router. Cosine over SIF
+ * embeddings of text from one codebase has a floor well above zero, so every
+ * question looked like a partial memory hit and a weight large enough to
+ * matter on a real hit was quietly pulling unrelated questions local too -
+ * visible in `pca eval` as a routing coverage that did not match the answer
+ * kinds beside it. Rescaling against the same threshold the answerer uses keeps
+ * the router from promising a recall the answerer will not deliver.
+ */
+export function recallStrength(recall: Recall | undefined): number {
+  if (!recall || !isStrongRecall(recall)) return 0;
+  // A step, then a ramp. A pure ramp would hand the router ~0 for a recall that
+  // only just clears the threshold - so the answerer would replay a stored
+  // answer while the router was sending the same turn to Claude. Anything the
+  // answerer considers replayable starts at half weight.
+  return 0.5 + 0.5 * Math.min(1, (recall.score - REPLAY_THRESHOLD) / (1 - REPLAY_THRESHOLD));
 }
 
 /**

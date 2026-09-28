@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { Bundle } from "../core/bundle.js";
-import { evalLineCompletion, evalNeuralAndHybrid, evalNgram } from "../core/evaluate.js";
+import { evalLineCompletion, evalNeuralAndHybrid, evalNgram, evalRouting } from "../core/evaluate.js";
+import { loadLessons } from "../chat/memory.js";
 import { loadCorpus, trainProject } from "../core/train.js";
 import { trainNeural } from "../core/trainNeural.js";
 import { isValidationFile } from "../core/train.js";
@@ -150,8 +151,42 @@ export async function cmdEval(args: ParsedArgs): Promise<number> {
   info(`  ${color.dim("latency mean / p95")}   ${line.meanLatencyMs.toFixed(2)}ms / ${line.p95LatencyMs.toFixed(2)}ms`);
   info("");
 
+  // How much of what you have already asked could now be answered without
+  // Claude. Each question is scored against a memory that excludes its own
+  // answer, so this measures coverage rather than storage.
+  const lessons = loadLessons(bundle).lessons;
+  let routing = null;
+  if (lessons.length > 0) {
+    step(`Routing coverage over ${lessons.length} remembered questions (leave-one-out)`);
+    routing = evalRouting(bundle, lessons);
+    info("");
+    info(color.bold("What the local half could handle on its own"));
+    info(`  ${color.dim("questions")}            ${routing.questions}`);
+    info(`  ${color.dim("routed local")}         ${pct(routing.local)}  (mean p(claude) ${routing.meanPClaude.toFixed(2)})`);
+    info(`  ${color.dim("covered by memory")}    ${pct(routing.coveredByOthers)}  (another stored answer already covers it)`);
+    const kinds = Object.entries(routing.byKind)
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, n]) => `${kind} ${n}`)
+      .join(" · ");
+    info(`  ${color.dim("local answer kinds")}   ${kinds}`);
+    info(
+      color.dim(
+        "  This says the local half would answer, not that it would answer as well\n" +
+          "  as Claude. Those are different claims; only the first is measurable here.",
+      ),
+    );
+    info("");
+  } else {
+    info(
+      color.dim(
+        "No remembered answers yet, so there is nothing to measure about routing.\n" +
+          "`pca chat` fills memory; `pca eval` then reports how much of it the local half covers.\n",
+      ),
+    );
+  }
+
   if (flagBool(args, "json")) {
-    process.stdout.write(`${JSON.stringify({ ngram, neural, hybrid, line }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ngram, neural, hybrid, line, routing }, null, 2)}\n`);
   }
   return 0;
 }

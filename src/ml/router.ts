@@ -67,15 +67,30 @@ export class Router {
     };
     // Prior: escalate unless there is concrete evidence the local half can
     // handle it. Being wrong towards Claude costs a few cents; being wrong
-    // towards local costs a useless answer, which is worse.
-    w("bias", 0.8);
-    // A near-exact hit in memory is the single strongest local signal - it
-    // means a frontier model already answered this exact question about this
-    // exact codebase, and the answer is on disk.
-    w("memoryTop", -4.0);
+    // towards local costs a useless answer, which is worse. Set so that a
+    // question of no particular shape - neither a lookup nor obviously
+    // reasoning - lands just above the threshold and goes to Claude. Ties
+    // break towards the model that can actually think.
+    w("bias", 1.1);
+    // A hit in memory is the single strongest local signal, and it is weighted
+    // to win outright: a frontier model already answered this question about
+    // this codebase and the answer is on disk, so paying to generate a near
+    // duplicate is waste. Large enough that even the weakest replayable recall
+    // outvotes a "why does ..." shape, which is the case it has to get right.
+    w("memoryTop", -7.0);
+    // Several memories matching equally well is ambiguity, not evidence.
     w("memorySecond", 1.2);
-    w("retrievalTop", -1.0);
-    w("retrievalCoverage", -1.5);
+    // The retrieval features get small weights on purpose. Both sit near 1.0
+    // for almost any question about a repository you have indexed, so a large
+    // weight would act as a second bias term and drown out question shape -
+    // which is what `pca eval` caught them doing. Their information is at the
+    // *low* end: a question full of terms this index has never seen is one the
+    // local half cannot possibly answer.
+    w("retrievalTop", -0.4);
+    w("retrievalCoverage", -0.6);
+    // Question shape carries the decision. Finding code is a lookup; explaining
+    // it, or changing it, is not - and a good retrieval hit does not make the
+    // local models able to reason about what they retrieved.
     w("locateShape", -2.5);
     w("reasonShape", 2.0);
     w("editShape", 2.5);
