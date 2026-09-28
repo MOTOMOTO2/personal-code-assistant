@@ -20,6 +20,36 @@ $ pca complete --file src/ml/params.ts --line 118
 
 ---
 
+## Quickstart: using it right now
+
+This repository is already built and already trained on itself, so the local
+half works immediately. The `pca` command is only on your PATH after `npm link`;
+until then, invoke it directly:
+
+```bash
+node dist/cli.js doctor                       # confirm setup
+node dist/cli.js complete "const user = await db."
+node dist/cli.js search "where are gradients clipped"
+node dist/cli.js neighbors tokenizer
+node dist/cli.js stats --weights
+```
+
+`npm run pca -- <args>` does the same thing via the package script. To get the
+short `pca` form, run `npm link` once (this writes a symlink into your global
+npm prefix), after which every example below works verbatim.
+
+If `dist/` is missing or stale, run `npm run build` first. If `.pca/` is missing,
+run `node dist/cli.js train` — a few seconds.
+
+**The Claude-backed commands (`ask`, `explain`, `review`, `refactor`) need
+`ANTHROPIC_API_KEY` and are disabled without it.** Everything above is local,
+offline, and needs no key. `doctor` tells you which half is live.
+
+To use it on a *different* project, `cd` there and run `pca train` — models are
+stored per-project in `.pca/`, so nothing is shared between codebases.
+
+---
+
 ## Read this first: what this is, and what it is not
 
 You asked for something "amazing with coding like you are". Two honest points up
