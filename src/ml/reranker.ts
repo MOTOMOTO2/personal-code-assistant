@@ -80,11 +80,19 @@ export class Reranker {
     this.weights[featureIndex("ngramLogProbSum")] = 1.2;
       this.weights[featureIndex("neuralLogProb")] = 0.6;
       this.weights[featureIndex("modelsAgree")] = 0.3;
-      this.weights[featureIndex("ngramRank")] = 0.4;
+      // The n-gram's proposal order is largely redundant with its log-probability,
+    // and among near-ties it is arbitrary - so it gets little weight.
+    this.weights[featureIndex("ngramRank")] = 0.15;
       // Length is not intrinsically good; ngramLogProbSum already prices it.
     this.weights[featureIndex("charLength")] = 0.0;
       this.weights[featureIndex("isIdentifier")] = 0.1;
-      this.weights[featureIndex("localFileHits")] = 0.3;
+      // Code repeats itself locally more than a fixed-order n-gram can see, so a
+    // candidate whose sub-words already appear near the cursor is a good bet -
+    // but only up to a point. Swept on held-out line completion
+    // (bench/tune-locality.mjs): 0.5 maximises both axes at once - 36.9% of
+    // suggestions fully correct and 2.20 characters saved per call, against
+    // 33.3% / 1.99 with the feature switched off entirely.
+    this.weights[featureIndex("localFileHits")] = 0.5;
       this.weights[featureIndex("retrievalHits")] = 0.25;
       this.weights[featureIndex("embedSimilarity")] = 0.35;
       this.weights[featureIndex("continuesPartial")] = 0.8;

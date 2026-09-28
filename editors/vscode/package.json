@@ -1,0 +1,63 @@
+{
+  "name": "pca-inline",
+  "displayName": "Personal Code Assistant",
+  "description": "Inline completions from locally-trained models that learn your codebase.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages", "Machine Learning"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Personal Code Assistant",
+      "properties": {
+        "pca.port": {
+          "type": "number",
+          "default": 7717,
+          "description": "Port the `pca serve` daemon is listening on."
+        },
+        "pca.token": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token, if the daemon was started with PCA_TOKEN set."
+        },
+        "pca.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline completions."
+        },
+        "pca.neural": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the transformer in scoring. More context, but tens of milliseconds slower."
+        },
+        "pca.debounceMs": {
+          "type": "number",
+          "default": 40,
+          "description": "Wait this long after a keystroke before requesting a completion."
+        },
+        "pca.maxSuggestions": {
+          "type": "number",
+          "default": 3,
+          "description": "How many alternatives to offer."
+        }
+      }
+    },
+    "commands": [
+      { "command": "pca.toggle", "title": "PCA: Toggle Inline Completions" },
+      { "command": "pca.status", "title": "PCA: Show Daemon Status" },
+      { "command": "pca.search", "title": "PCA: Search Codebase" }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.0"
+  }
+}

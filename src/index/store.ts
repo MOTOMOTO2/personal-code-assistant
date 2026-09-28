@@ -25,6 +25,8 @@ export interface IndexedChunk {
   startLine: number;
   endLine: number;
   symbol: string | null;
+  /** All declarations inside the chunk; `symbol` is the first of these. */
+  symbols: string[];
   text: string;
 }
 
@@ -290,7 +292,11 @@ export class IndexStore {
 
   static load(indexFile: string, vectorFile: string): IndexStore {
     const data = readJsonGz<IndexData>(indexFile);
-    const chunks: IndexedChunk[] = data.chunks.map((c, id) => ({ id, ...c }));
+    const chunks: IndexedChunk[] = data.chunks.map((c, id) => ({
+      id,
+      ...c,
+      symbols: c.symbols ?? (c.symbol ? [c.symbol] : []),
+    }));
     let vectors = new Float32Array(0);
     if (data.embeddingDim > 0 && fs.existsSync(vectorFile)) {
       const buf = fs.readFileSync(vectorFile);

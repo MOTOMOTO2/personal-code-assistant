@@ -87,12 +87,24 @@ const KEYWORDS = new Set([
 const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
 /** Local context window used to derive locality features, in characters. */
 const LOCAL_WINDOW = 4000;
+/**
+ * Log-probability bonus for a candidate whose sub-words already appear near the
+ * cursor. Tuned on held-out line completion; see bench/sweep.mjs.
+ */
+const LOCALITY_PRIOR = 2.0;
 /** Tokens of history fed to the n-gram. More than this changes nothing. */
 const HISTORY_TOKENS = 32;
 
 interface Beam {
   tokens: number[];
   logProb: number;
+  /**
+   * Locality prior for this beam's first token, kept separate from `logProb` so
+   * the reported model score stays pure. It is included in the pruning
+   * comparison: applying it only when seeding was useless, because the very next
+   * prune re-ranked on raw log-probability and threw the locality picks away.
+   */
+  bonus: number;
   text: string;
   /** Rank of the first token in the initial proposal list. */
   firstRank: number;
@@ -156,7 +168,15 @@ export class CompletionEngine {
     const retrievalTerms = req.retrieval ? this.retrievalTerms(req, localText) : null;
 
     // --- stage 1: propose -------------------------------------------------
-    const firstCandidates = this.firstTokenCandidates(history, partial, localText, beamWidth * 4);
+    const firstCandidates = this.firstTokenCandidates(
+      history,
+      partial,
+      localText,
+      localCounts,
+      // Seed wider than the beam: the first token is the most consequential
+      // choice, and pruning to beamWidth happens after the first expansion.
+      beamWidth * 2,
+    );
     const beams = this.beamSearch(history, firstCandidates, {
       beamWidth,
       maxTokens,
@@ -200,7 +220,11 @@ export class CompletionEngine {
       f[featureIndex("charLength")] = clamp(insertion.length / 24, 0, 1);
       f[featureIndex("isIdentifier")] = IDENT_RE.test(firstPiece) && !KEYWORDS.has(firstPiece) ? 1 : 0;
       f[featureIndex("isKeyword")] = KEYWORDS.has(firstPiece) ? 1 : 0;
-      f[featureIndex("localFileHits")] = clamp(localHits(beam.text, localCounts) / 3, 0, 1);
+      f[featureIndex("localFileHits")] = clamp(
+        exactLocalCount(firstPiece, localCounts) / 3,
+        0,
+        1,
+      );
       f[featureIndex("retrievalHits")] = retrievalTerms
         ? clamp(retrievalHits(beam.text, retrievalTerms) / 3, 0, 1)
         : 0;
@@ -252,15 +276,19 @@ export class CompletionEngine {
     history: number[],
     partial: string,
     localText: string,
+    localCounts: Map<string, number>,
     want: number,
-  ): Array<{ id: number; logProb: number }> {
+  ): Array<{ id: number; logProb: number; bonus: number }> {
     const tokenizer = this.bundle.tokenizer;
     const ngram = this.bundle.ngram;
     const ctx = ngram.contextFor(history);
     // Ask for a wide pool: under a partial-word constraint most of the top
     // proposals get filtered out.
-    const pool = ngram.predictIn(ctx, partial.length > 0 ? 400 : Math.max(want, 24), 600);
-    const out: Array<{ id: number; logProb: number }> = [];
+    const pool = ngram.predictIn(ctx, partial.length > 0 ? 400 : Math.max(want * 4, 64), 600);
+    // Gather a pool several times wider than the beam, because the ranking that
+    // decides which candidates survive is applied below, not by the n-gram.
+    const pool_cap = Math.max(want * 4, 48);
+    const out: Array<{ id: number; logProb: number; bonus: number }> = [];
     const seen = new Set<number>();
     for (const cand of pool) {
       const piece = tokenizer.pieceOf(cand.id);
@@ -268,8 +296,8 @@ export class CompletionEngine {
       if (partial.length > 0 && !piece.startsWith(partial)) continue;
       if (tokenizer.isByte(cand.id)) continue; // byte tokens are not useful alone
       seen.add(cand.id);
-      out.push(cand);
-      if (out.length >= want) break;
+      out.push({ ...cand, bonus: 0 });
+      if (out.length >= pool_cap) break;
     }
     if (partial.length > 0) {
       // Local symbols matching the fragment, even if the n-gram never saw them
@@ -278,25 +306,58 @@ export class CompletionEngine {
         const id = tokenizer.idOf(word);
         if (id === undefined || seen.has(id)) continue;
         seen.add(id);
-        out.push({ id, logProb: ngram.logProbIn(ctx, id) });
+        out.push({ id, logProb: ngram.logProbIn(ctx, id), bonus: 0 });
       }
-      out.sort((a, b) => b.logProb - a.logProb);
     }
-    return out.slice(0, Math.max(want, 8));
+    // An n-gram of order N is blind to anything more than N-1 tokens back, so a
+    // candidate that echoes a term used earlier in the buffer - the resource
+    // name in `findOne("user", request.userId)` being the classic case - can sit
+    // well outside the top few by log-probability alone, and be truncated away
+    // before the reranker ever sees it.
+    //
+    // The seed set is therefore a *union*, not a re-sort: the model's own best
+    // candidates are kept unconditionally, and locality is only allowed to add
+    // to them. An earlier version re-sorted by a locality-adjusted score, which
+    // let a term that merely appeared nearby outrank a far more probable
+    // continuation - suggesting `findOne` after `request.` because "findOne" was
+    // on the same line.
+    const limit = Math.max(want, 8);
+    out.sort((a, b) => b.logProb - a.logProb);
+    const byModel = out.slice(0, Math.max(2, Math.ceil(limit * 0.6)));
+    const localitySlots = limit - byModel.length;
+    const chosen = new Set(byModel.map((c) => c.id));
+    const withBonus = (c: { id: number; logProb: number; bonus: number }): number =>
+      (LOCALITY_PRIOR * Math.min(exactLocalCount(tokenizer.pieceOf(c.id), localCounts), 3)) / 3;
+    // Candidates the model already ranked highly keep their bonus too, so a
+    // locally-frequent identifier stays ahead of an equally probable stranger.
+    for (const c of byModel) c.bonus = withBonus(c);
+    const byLocality = out
+      .filter((c) => !chosen.has(c.id))
+      .map((c) => {
+        c.bonus = withBonus(c);
+        return c;
+      })
+      .sort((a, b) => b.logProb + b.bonus - (a.logProb + a.bonus))
+      .slice(0, Math.max(0, localitySlots));
+    // Deliberately *not* re-sorted by log-probability: doing so would push every
+    // locality pick back to the bottom of the list and straight out of the beam,
+    // which is the whole thing this union exists to prevent.
+    return [...byModel, ...byLocality];
   }
 
   private beamSearch(
     history: number[],
-    first: Array<{ id: number; logProb: number }>,
+    first: Array<{ id: number; logProb: number; bonus: number }>,
     opts: { beamWidth: number; maxTokens: number; singleLine: boolean; minEvidenceOrder: number },
   ): Beam[] {
     const tokenizer = this.bundle.tokenizer;
     const ngram = this.bundle.ngram;
-    let beams: Beam[] = first.slice(0, opts.beamWidth).map((cand, rank) => {
+    let beams: Beam[] = first.map((cand, rank) => {
       const piece = tokenizer.pieceOf(cand.id);
       return {
         tokens: [cand.id],
         logProb: cand.logProb,
+        bonus: cand.bonus,
         text: piece,
         firstRank: rank,
         done: opts.singleLine && piece.includes("\n"),
@@ -336,6 +397,7 @@ export class CompletionEngine {
           next.push({
             tokens: [...beam.tokens, pred.id],
             logProb: beam.logProb + pred.logProb,
+            bonus: beam.bonus,
             text: beam.text + piece,
             firstRank: beam.firstRank,
             done: false,
@@ -344,7 +406,8 @@ export class CompletionEngine {
       }
       if (next.length === 0) break;
       // Length-normalised so short beams are not automatically preferred.
-      next.sort((a, b) => b.logProb / b.tokens.length - a.logProb / a.tokens.length);
+      const rank = (b: Beam): number => (b.logProb + b.bonus) / b.tokens.length;
+      next.sort((a, b) => rank(b) - rank(a));
       beams = next.slice(0, opts.beamWidth);
       // Every prefix is a valid suggestion, so keep the partial beams too.
       for (const beam of beams) finished.push({ ...beam });
@@ -401,10 +464,18 @@ function countTerms(text: string): Map<string, number> {
   return counts;
 }
 
-function localHits(text: string, counts: Map<string, number>): number {
-  let hits = 0;
-  for (const term of searchTerms(text)) hits += Math.min(counts.get(term) ?? 0, 3);
-  return hits;
+/**
+ * How often this exact identifier already appears near the cursor.
+ *
+ * Deliberately *not* sub-word based. Summing sub-word matches looks more
+ * generous but is useless here: `userId` and `invoiceId` both contain `id`, so
+ * every candidate saturated the signal and it carried no information at all.
+ * The exact identifier is the sharp signal - `userId` appears throughout the
+ * file you are editing, `invoiceId` does not.
+ */
+function exactLocalCount(piece: string, counts: Map<string, number>): number {
+  const key = piece.toLowerCase();
+  return counts.get(key) ?? 0;
 }
 
 function retrievalHits(text: string, terms: Set<string>): number {
@@ -453,7 +524,9 @@ function dedupeBeams(beams: Beam[]): Beam[] {
   for (const beam of beams) {
     const key = beam.text;
     const existing = seen.get(key);
-    if (!existing || beam.logProb > existing.logProb) seen.set(key, beam);
+    if (!existing || beam.logProb + beam.bonus > existing.logProb + existing.bonus) {
+      seen.set(key, beam);
+    }
   }
   return [...seen.values()];
 }

@@ -15,3 +15,7 @@ Thumbs.db
 !.vscode/settings.json
 editors/vscode/out/
 editors/vscode/*.vsix
+
+# VS Code extension build output
+editors/vscode/node_modules/
+editors/vscode/out/

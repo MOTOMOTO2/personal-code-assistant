@@ -15,8 +15,10 @@ export interface Chunk {
   /** Line number of the last line, 1-based inclusive. */
   endLine: number;
   text: string;
-  /** Best-effort declared name, e.g. "renderTable" or "class UserStore". */
+  /** Primary declared name - the first declaration inside the chunk. */
   symbol: string | null;
+  /** Every declaration detected inside the chunk, in source order. */
+  symbols: string[];
 }
 
 export interface ChunkOptions {
@@ -118,23 +120,44 @@ export function chunkFile(text: string, opts: ChunkOptions = {}): Chunk[] {
       size = nextSize;
       j++;
     }
+    // Merging absorbs later cut points, so the chunk's name is the first symbol
+    // declared anywhere inside it - not just one declared on its first line.
+    const symbolsIn = (from: number, to: number): string[] => {
+      const found: string[] = [];
+      for (let c = 0; c < cuts.length; c++) {
+        if (cuts[c] >= from && cuts[c] < to) {
+          const name = symbolAt.get(cuts[c]);
+          if (name && !found.includes(name)) found.push(name);
+        }
+      }
+      return found;
+    };
+
     // A single oversized symbol still has to be split somewhere.
     if (size > maxChars) {
       for (const piece of splitOversized(lines, start, end, maxChars)) {
+        const symbols = symbolsIn(piece.start, piece.end);
+        const inherited = symbolAt.get(start);
+        // A continuation piece carries the enclosing symbol's name so a search
+        // hit in the middle of a long function still says what it is in.
+        if (symbols.length === 0 && inherited) symbols.push(inherited);
         chunks.push({
           startLine: piece.start + 1,
           endLine: piece.end,
           text: lines.slice(piece.start, piece.end).join("\n"),
-          symbol: symbolAt.get(piece.start) ?? symbolAt.get(start) ?? null,
+          symbol: symbols[0] ?? null,
+          symbols,
         });
       }
     } else {
       const from = Math.max(0, start - (chunks.length > 0 ? overlapLines : 0));
+      const symbols = symbolsIn(start, end);
       chunks.push({
         startLine: from + 1,
         endLine: end,
         text: lines.slice(from, end).join("\n"),
-        symbol: symbolAt.get(start) ?? null,
+        symbol: symbols[0] ?? null,
+        symbols,
       });
     }
     i = Math.max(j, i + 1);

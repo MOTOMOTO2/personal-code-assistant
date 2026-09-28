@@ -183,6 +183,7 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
           startLine: c.startLine,
           endLine: c.endLine,
           symbol: c.symbol,
+          symbols: c.symbols,
           text: c.text,
         });
       }
