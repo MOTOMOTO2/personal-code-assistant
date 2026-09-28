@@ -1,20 +1,29 @@
 import http from "node:http";
 import { Bundle } from "../core/bundle.js";
 import { CompletionEngine, CompletionRequest } from "../core/complete.js";
+import { ChatSession, Route } from "../chat/session.js";
+import { loadLessons } from "../chat/memory.js";
+import { trainProject } from "../core/train.js";
 import { normalize } from "../ml/embeddings.js";
+import { hasCredentials } from "../llm/claude.js";
 import { retrievalQuery } from "../llm/prompts.js";
+import { CHAT_HTML } from "../web/ui.js";
 import { Workspace } from "../util/paths.js";
 import { color, info, ok, warn } from "../util/log.js";
 
 /**
- * Loopback HTTP daemon.
+ * Loopback HTTP daemon: one warm process serving the editor and the browser.
  *
  * Model load is the dominant cost for a one-shot CLI invocation - the n-gram
  * tables are tens of megabytes. Keeping one warm process means the editor sees
- * only inference time, which is what makes inline completion viable at all.
+ * only inference time, which is what makes inline completion viable at all. The
+ * chat UI rides on the same warm models, so a browser turn costs no more than
+ * an editor keystroke does.
  *
  * Binds to 127.0.0.1 exclusively and, when PCA_TOKEN is set, requires it as a
- * bearer token. Nothing here should ever be exposed off-host.
+ * bearer token. Because a browser now talks to it, the Host header is checked
+ * as well: a loopback bind alone does not stop a public DNS name from resolving
+ * to 127.0.0.1 and a page on that origin reaching this port.
  */
 
 export const DEFAULT_PORT = 7717;
@@ -25,6 +34,8 @@ export interface DaemonOptions {
   token?: string;
   /** Exit after this many idle milliseconds. 0 disables the timeout. */
   idleTimeoutMs?: number;
+  /** Serve the browser chat client at `/`. */
+  ui?: boolean;
 }
 
 interface FeedbackBody {
@@ -42,6 +53,9 @@ export function createDaemon(ws: Workspace, opts: DaemonOptions = {}) {
   const engine = new CompletionEngine(bundle);
   const token = opts.token ?? process.env.PCA_TOKEN ?? null;
   const idleTimeoutMs = opts.idleTimeoutMs ?? 0;
+  const ui = opts.ui ?? false;
+  /** One conversation per browser tab, keyed by the id the client sends. */
+  const sessions = new Map<string, ChatSession>();
 
   let lastActivity = Date.now();
   let requests = 0;
@@ -60,15 +74,41 @@ export function createDaemon(ws: Workspace, opts: DaemonOptions = {}) {
       res.end(payload);
     };
 
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    // Only loopback origins. Blocks DNS rebinding, which a 127.0.0.1 bind does
+    // not: a public hostname can resolve here, and the browser would send its
+    // own name in Host.
+    const host = (req.headers.host ?? "").split(":")[0];
+    if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
+      send(403, { error: "forbidden host" });
+      return;
+    }
+
     if (token) {
+      // The query parameter is for the browser client, which cannot set a
+      // header on the initial page load. Loopback-only, so the URL never
+      // leaves this machine.
       const auth = req.headers.authorization;
-      if (auth !== `Bearer ${token}`) {
+      if (auth !== `Bearer ${token}` && url.searchParams.get("token") !== token) {
         send(401, { error: "unauthorized" });
         return;
       }
     }
 
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+      if (!ui) {
+        send(404, { error: "not found", hint: "start with `pca serve --ui` for the chat client" });
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-length": Buffer.byteLength(CHAT_HTML),
+        "cache-control": "no-store",
+      });
+      res.end(CHAT_HTML);
+      return;
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       send(200, {
@@ -87,14 +127,47 @@ export function createDaemon(ws: Workspace, opts: DaemonOptions = {}) {
     if (req.method === "GET" && url.pathname === "/stats") {
       send(200, {
         manifest: bundle.manifest,
-        index: bundle.index?.stats() ?? null,
+        index: bundle.isTrained ? (bundle.index?.stats() ?? null) : null,
         reranker: {
           updates: bundle.reranker.updates,
           accepted: bundle.reranker.accepted,
           rejected: bundle.reranker.rejected,
           weights: bundle.reranker.describe(),
         },
+        router: {
+          updates: bundle.router.updates,
+          toLocal: bundle.router.toLocal,
+          toClaude: bundle.router.toClaude,
+          weights: bundle.router.describe(),
+        },
+        memory: { lessons: loadLessons(bundle).size },
+        claudeAvailable: hasCredentials(),
         style: bundle.style,
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/memory") {
+      const store = loadLessons(bundle);
+      const q = url.searchParams.get("q");
+      const recalls = q
+        ? store.recall(q, {
+            limit: 8,
+            tokenizer: bundle.isTrained ? bundle.tokenizer : undefined,
+            embeddings: bundle.isTrained ? bundle.embeddings : null,
+          })
+        : store.lessons.slice(-8).reverse().map((lesson) => ({ lesson, score: 1 }));
+      send(200, {
+        total: store.size,
+        lessons: recalls.map((r) => ({
+          id: r.lesson.id,
+          at: r.lesson.at,
+          question: r.lesson.question,
+          answer: r.lesson.answer,
+          model: r.lesson.model,
+          cites: r.lesson.cites,
+          score: r.score,
+        })),
       });
       return;
     }
@@ -180,6 +253,77 @@ export function createDaemon(ws: Workspace, opts: DaemonOptions = {}) {
               text: hit.chunk.text,
             })),
           });
+          return;
+        }
+
+        if (url.pathname === "/chat") {
+          const { message, force, sessionId } = body as {
+            message?: string;
+            force?: Route | null;
+            sessionId?: string;
+          };
+          if (typeof message !== "string" || message.trim().length === 0) {
+            send(400, { error: "message is required" });
+            return;
+          }
+          const key = typeof sessionId === "string" && sessionId.length > 0 ? sessionId : "default";
+          let session = sessions.get(key);
+          if (!session) {
+            session = new ChatSession(bundle, { id: key });
+            sessions.set(key, session);
+          }
+          // Server-sent events: one JSON object per `data:` frame. The turn can
+          // take tens of seconds, and a buffered response would look hung.
+          res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+          const emit = (event: unknown) => {
+            if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+          };
+          session
+            .ask(message, {
+              force: force ?? null,
+              onRoute: (route, pClaude, why) => emit({ type: "route", route, pClaude, why }),
+              onThinking: (text) => emit({ type: "thinking", text }),
+              onText: (text) => emit({ type: "text", text }),
+            })
+            .then((result) => {
+              emit({
+                type: "done",
+                route: result.route,
+                kind: result.kind,
+                // Local answers are not streamed, so the text arrives here.
+                text: result.route === "local" ? result.text : "",
+                sources: result.sources,
+                costUsd: result.costUsd,
+                lessonId: result.lessonId,
+                confidence: result.confidence,
+              });
+              res.end();
+            })
+            .catch((err: Error) => {
+              emit({ type: "error", message: err.message });
+              res.end();
+            });
+          return;
+        }
+
+        if (url.pathname === "/train") {
+          // Synchronous and seconds-long: it blocks this daemon's event loop on
+          // purpose, because serving completions from half-written artifacts
+          // would be worse than a brief stall.
+          try {
+            const report = trainProject(bundle, (body as { options?: object }).options ?? {});
+            bundle.reload();
+            engine.warm({ retrieval: true });
+            for (const session of sessions.values()) session.refreshMemory();
+            send(200, report);
+          } catch (err) {
+            send(500, { error: (err as Error).message });
+          }
           return;
         }
 

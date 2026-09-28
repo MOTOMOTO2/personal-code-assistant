@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { EmbeddingModel } from "../ml/embeddings.js";
 import { NgramModel } from "../ml/ngram.js";
 import { Reranker } from "../ml/reranker.js";
+import { Router } from "../ml/router.js";
 import { Transformer } from "../ml/transformer.js";
 import { IndexStore } from "../index/store.js";
 import { Tokenizer } from "../tokenizer/tokenizer.js";
@@ -21,6 +22,8 @@ export const ARTIFACTS = {
   reranker: "reranker.json.gz",
   style: "style.json.gz",
   feedback: "feedback.jsonl",
+  router: "router.json.gz",
+  lessons: "lessons.jsonl",
 } as const;
 
 export const MANIFEST_VERSION = 2;
@@ -61,6 +64,7 @@ export class Bundle {
   private _embeddings?: EmbeddingModel | null;
   private _index?: IndexStore | null;
   private _reranker?: Reranker;
+  private _router?: Router;
   private _style?: StyleProfile;
   private _manifest?: Manifest | null;
 
@@ -149,6 +153,19 @@ export class Bundle {
     this.reranker.save(this.path("reranker"));
   }
 
+  /** The local-vs-Claude route model. Starts from hand-set priors. */
+  get router(): Router {
+    if (!this._router) {
+      this._router = exists(this.path("router")) ? Router.load(this.path("router")) : new Router();
+    }
+    return this._router;
+  }
+
+  saveRouter(): void {
+    ensureStateDir(this.ws);
+    this.router.save(this.path("router"));
+  }
+
   get style(): StyleProfile {
     if (!this._style) {
       this._style = exists(this.path("style")) ? loadStyle(this.path("style")) : { ...DEFAULT_STYLE };
@@ -160,6 +177,25 @@ export class Bundle {
     ensureStateDir(this.ws);
     saveStyle(this.path("style"), style);
     this._style = style;
+  }
+
+  /**
+   * Drop every cached model so the next access re-reads `.pca/`.
+   *
+   * Needed by the long-lived daemon: after an in-process retrain the artifacts
+   * on disk have changed, and continuing to serve from the old in-memory n-gram
+   * would mean the "retrain" button visibly did nothing.
+   */
+  reload(): void {
+    this._tokenizer = undefined;
+    this._ngram = undefined;
+    this._neural = undefined;
+    this._embeddings = undefined;
+    this._index = undefined;
+    this._style = undefined;
+    this._manifest = undefined;
+    // The reranker and router are *learned from you*, not derived from the
+    // corpus, so they are deliberately kept across a retrain.
   }
 
   /** Append one JSON line of feedback. Used by the online reranker. */

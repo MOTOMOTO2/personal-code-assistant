@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { cmdChat } from "./commands/chat.js";
 import { cmdComplete } from "./commands/complete.js";
+import { cmdLearn } from "./commands/learn.js";
 import { cmdDoctor, cmdNeighbors, cmdSearch, cmdStats } from "./commands/inspect.js";
 import { cmdAsk, cmdExplain, cmdRefactor, cmdReview } from "./commands/llm.js";
 import { cmdEval, cmdTrain } from "./commands/train.js";
@@ -16,8 +18,15 @@ const HELP = `${color.bold("pca")} - personal code assistant ${color.dim(`v${VER
 
   Local models that learn your codebase, plus Claude for the hard questions.
 
+${color.bold("Chat")} ${color.dim("(routes each turn: local models first, Claude when it matters)")}
+  pca chat                       Conversation in the terminal
+  pca chat "where is the retry logic?"   One question, then exit
+  pca serve --ui                 Same chat in the browser
+
 ${color.bold("Train")}
   pca train                      Train the fast models (tokenizer, n-gram, index, embeddings)
+  pca learn                      Retrain, folding in everything chat has remembered
+  pca learn --watch              Keep retraining as you edit
   pca train --neural --minutes 10  Also train the transformer, for 10 minutes
   pca train --neural-only --resume Continue training the transformer only
   pca eval                       Measure quality on held-out files
@@ -27,7 +36,7 @@ ${color.bold("Use locally")} ${color.dim("(no network, no API key)")}
   pca complete "const user = await db."
   pca search "where do we retry uploads"
   pca neighbors userId           Nearest tokens in the learned embedding space
-  pca stats [--weights]          What has been trained, and what it learned about you
+  pca stats [--weights] [--router] [--memory]
   pca doctor                     Check the setup
 
 ${color.bold("Ask Claude")} ${color.dim("(needs ANTHROPIC_API_KEY)")}
@@ -37,13 +46,14 @@ ${color.bold("Ask Claude")} ${color.dim("(needs ANTHROPIC_API_KEY)")}
   pca refactor src/auth.ts "extract the retry logic" [--write]
 
 ${color.bold("Editor integration")}
-  pca serve [--port ${DEFAULT_PORT}]      Warm daemon for inline completion (see editors/vscode)
+  pca serve [--port ${DEFAULT_PORT}] [--ui]  Warm daemon for completion and chat
 
 ${color.bold("Common flags")}
   --neural        Include the transformer in scoring (slower, more context)
   --json          Machine-readable output
   --effort LEVEL  low|medium|high|xhigh|max for Claude commands
   --think         Stream a summary of Claude's reasoning
+  --local         Keep a chat turn on the local models
   --quiet         Suppress status output
   --help          Show this
 
@@ -53,7 +63,9 @@ ${color.dim("Everything trained is stored in .pca/ in your project. Add it to .g
 type Handler = (args: ParsedArgs) => Promise<number>;
 
 const COMMANDS: Record<string, Handler> = {
+  chat: cmdChat,
   train: cmdTrain,
+  learn: cmdLearn,
   eval: cmdEval,
   complete: cmdComplete,
   search: cmdSearch,
@@ -73,6 +85,7 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
   const daemon = createDaemon(ws, {
     port: flagNumber(args, "port", DEFAULT_PORT),
     idleTimeoutMs: flagNumber(args, "idle-timeout", 0),
+    ui: flagBool(args, "ui"),
   });
   await daemon.listen();
   // Resolve only when the server closes, so the process stays up.

@@ -8,6 +8,7 @@ import { fileSizeSafe, humanBytes } from "../util/io.js";
 import { ARTIFACTS } from "../core/bundle.js";
 import { workspace } from "../util/paths.js";
 import { walkSources } from "../index/walker.js";
+import { loadLessons } from "../chat/memory.js";
 
 export async function cmdSearch(args: ParsedArgs): Promise<number> {
   const ws = workspace();
@@ -166,6 +167,35 @@ export async function cmdStats(args: ParsedArgs): Promise<number> {
   }
   info("");
 
+  const memory = loadLessons(bundle);
+  const router = bundle.router;
+  info(color.bold("Memory and routing"));
+  info(`  answers remembered ${memory.size}`);
+  info(
+    `  route decisions    ${router.toLocal} local, ${router.toClaude} claude (${router.updates} corrections)`,
+  );
+  if (flagBool(args, "memory") && memory.size > 0) {
+    info("");
+    for (const lesson of memory.lessons.slice(-8)) {
+      info(
+        `  ${color.dim(lesson.at.slice(0, 10))} ${lesson.question.replace(/\s+/g, " ").slice(0, 64)}`,
+      );
+    }
+  }
+  if (flagBool(args, "router")) {
+    info("");
+    for (const { feature, weight } of router.describe()) {
+      const mag = Math.min(24, Math.round(Math.abs(weight) * 6));
+      // Negative means "the local models can take this one".
+      const bar = (weight >= 0 ? color.magenta : color.green)("█".repeat(Math.max(1, mag)));
+      info(`  ${feature.padEnd(20)} ${weight >= 0 ? " " : "-"}${Math.abs(weight).toFixed(3)} ${bar}`);
+    }
+    info(color.dim("  magenta pushes a turn to Claude, green keeps it local"));
+  } else {
+    info(color.dim("  (--router for the learned weights, --memory for recent answers)"));
+  }
+  info("");
+
   const style = bundle.style;
   info(color.bold("Measured style"));
   info(
@@ -209,6 +239,13 @@ export async function cmdDoctor(): Promise<number> {
     hasCredentials(),
     "Anthropic credentials found (Claude commands enabled)",
     "no ANTHROPIC_API_KEY - `ask`/`review`/`explain` disabled, everything local still works",
+    true,
+  );
+  const memory = loadLessons(bundle);
+  check(
+    memory.size > 0,
+    `${memory.size} answers in memory (folded into the models by \`pca learn\`)`,
+    "memory empty - `pca chat` fills it as you use the assistant",
     true,
   );
   info("");

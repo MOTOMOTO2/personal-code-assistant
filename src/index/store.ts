@@ -251,6 +251,22 @@ export class IndexStore {
       }));
   }
 
+  /** Whether a search term appears anywhere in the index at all. */
+  knowsTerm(term: string): boolean {
+    return this.bm25.postings[term] !== undefined;
+  }
+
+  /** Fraction of the given terms the index has ever seen. */
+  coverage(terms: Iterable<string>): number {
+    let total = 0;
+    let known = 0;
+    for (const term of terms) {
+      total++;
+      if (this.knowsTerm(term)) known++;
+    }
+    return total > 0 ? known / total : 0;
+  }
+
   /** Chunks belonging to one file path, in line order. */
   chunksForFile(relPath: string): IndexedChunk[] {
     const fileIdx = this.files.findIndex((f) => f.path === relPath);

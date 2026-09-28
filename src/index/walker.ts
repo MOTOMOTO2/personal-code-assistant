@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** Directories never worth indexing, regardless of .gitignore. */
-const ALWAYS_SKIP_DIRS = new Set([
+export const ALWAYS_SKIP_DIRS = new Set([
   ".git",
   ".hg",
   ".svn",

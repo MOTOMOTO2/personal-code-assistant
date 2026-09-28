@@ -7,6 +7,7 @@ import { SourceFile, readSource, walkSources } from "../index/walker.js";
 import { EmbeddingModel, normalize } from "../ml/embeddings.js";
 import { NgramModel } from "../ml/ngram.js";
 import { Tokenizer } from "../tokenizer/tokenizer.js";
+import { loadLessons } from "../chat/memory.js";
 import { ensureStateDir } from "../util/paths.js";
 import { fmtDuration, ok, progress, progressDone, step, warn } from "../util/log.js";
 import { humanBytes } from "../util/io.js";
@@ -29,6 +30,8 @@ export interface TrainOptions {
   extraExtensions?: string[];
   /** Skip building the retrieval index (faster, but disables search/ask). */
   skipIndex?: boolean;
+  /** Include remembered chat answers in the corpus and index. Default true. */
+  includeLessons?: boolean;
 }
 
 export interface TrainReport {
@@ -40,6 +43,8 @@ export interface TrainReport {
   chunks: number;
   embeddingDim: number;
   valFiles: number;
+  /** Remembered answers folded into the corpus. */
+  lessons: number;
   seconds: number;
 }
 
@@ -106,6 +111,28 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
   if (trainIdx.length === 0) {
     // Tiny repo: a held-out split would leave nothing to learn from.
     trainIdx.push(...valIdx.splice(0, valIdx.length));
+  }
+
+  // --- memory -----------------------------------------------------------
+  // Answers already given about this codebase are training data. They go in
+  // after the style profile is measured (prose must not skew the code style)
+  // and always land in the training split - holding out an answer to evaluate
+  // perplexity on it would measure nothing useful.
+  let lessonCount = 0;
+  if (opts.includeLessons !== false) {
+    const docs = loadLessons(bundle).documents();
+    for (const doc of docs) {
+      trainIdx.push(texts.length);
+      texts.push(doc.text);
+      kept.push({
+        abs: bundle.path("lessons"),
+        rel: doc.path,
+        size: Buffer.byteLength(doc.text, "utf8"),
+        mtimeMs: Date.now(),
+      });
+      lessonCount++;
+    }
+    if (lessonCount > 0) ok(`Memory: ${lessonCount} remembered answers folded in`);
   }
 
   // --- tokenizer --------------------------------------------------------
@@ -245,6 +272,7 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
     chunks: chunkCount,
     embeddingDim: embeddingDimUsed,
     valFiles: valIdx.length,
+    lessons: lessonCount,
     seconds,
   };
 }
@@ -257,6 +285,7 @@ export function loadCorpus(
   bundle: Bundle,
   valFraction = 0.08,
   extraExtensions?: string[],
+  includeLessons = true,
 ): { train: number[][]; val: number[][]; trainPaths: string[]; valPaths: string[] } {
   const tokenizer = bundle.tokenizer;
   const files = walkSources(bundle.ws.root, { extraExtensions });
@@ -279,6 +308,14 @@ export function loadCorpus(
     } else {
       train.push(ids);
       trainPaths.push(file.rel);
+    }
+  }
+  if (includeLessons) {
+    for (const doc of loadLessons(bundle).documents()) {
+      const ids = tokenizer.encode(doc.text);
+      if (ids.length < 8) continue;
+      train.push(ids);
+      trainPaths.push(doc.path);
     }
   }
   if (train.length === 0 && val.length > 0) {
