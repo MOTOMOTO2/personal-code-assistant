@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { Bundle } from "../core/bundle.js";
 import { EmbeddingModel, normalize } from "../ml/embeddings.js";
 import { searchTerms } from "../index/store.js";
+import { STOPWORDS } from "../llm/prompts.js";
 import { Tokenizer } from "../tokenizer/tokenizer.js";
 
 /**
@@ -49,24 +50,32 @@ export interface Recall {
   score: number;
   lexical: number;
   semantic: number;
+  /** How many of the query's content terms the lesson actually contains. */
+  matchedTerms: number;
 }
 
 const CITE_RE = /\b([\w./\\-]+\.[A-Za-z][\w]{0,7}):(\d+)/g;
 
 /**
- * Search terms for memory, with plurals folded onto their singular.
+ * Content terms for memory: stopwords dropped, plurals folded onto the singular.
  *
- * Questions and answers are prose, where "where are the handlers" and "the
- * handler" are the same query. Code search terms are identifiers, where they
- * often are not - `users` and `user` can be different tables. So this stemming
- * lives here rather than in the code index.
+ * Both steps matter here in a way they do not for the code index. Questions are
+ * prose, so "where are the handlers" and "the handler" are the same query - and
+ * so are "where is X" and "why is X", which share every word except the one
+ * that carries the meaning. Scoring recall over raw words let a question about
+ * Kneser-Ney discounts match a stored answer about the locality weight on
+ * "where", "is" and "the" alone. Code search terms are identifiers, where
+ * neither rule holds (`users` and `user` can be different tables), which is why
+ * this lives here rather than in the shared tokenizer.
  */
 export function memoryTerms(text: string): string[] {
   const out: string[] = [];
   for (const term of searchTerms(text)) {
+    if (STOPWORDS.has(term)) continue;
     out.push(term);
     if (term.length > 3 && term.endsWith("s") && !term.endsWith("ss")) {
-      out.push(term.slice(0, -1));
+      const singular = term.slice(0, -1);
+      if (!STOPWORDS.has(singular)) out.push(singular);
     }
   }
   return out;
@@ -143,10 +152,14 @@ export class LessonStore {
       // result is a comparable 0..1 fraction rather than an unbounded sum.
       let matched = 0;
       let total = 0;
+      let matchedTerms = 0;
       for (const term of queryTerms) {
         const idf = Math.log(1 + n / (1 + (this.df.get(term) ?? 0)));
         total += idf;
-        if (this.terms[i].has(term)) matched += idf;
+        if (this.terms[i].has(term)) {
+          matched += idf;
+          matchedTerms++;
+        }
       }
       const lexical = total > 0 ? matched / total : 0;
 
@@ -160,7 +173,7 @@ export class LessonStore {
         semantic = Math.max(0, Math.min(1, dot));
       }
       const score = queryVector ? 0.6 * lexical + 0.4 * semantic : lexical;
-      return { lesson, score, lexical, semantic };
+      return { lesson, score, lexical, semantic, matchedTerms };
     });
 
     return scored

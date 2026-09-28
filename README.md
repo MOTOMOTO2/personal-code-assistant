@@ -4,19 +4,39 @@ A coding assistant you train on your own code, and a frontier model for the hard
 questions. Machine learning models implemented from scratch, running locally at
 interactive speed, with Claude wired in for the work that genuinely needs it.
 
-```
-$ pca train
-✓ Found 33 source files (212KB)
-✓ Vocabulary: 2287 tokens
-✓ Corpus: 97,200 tokens
-✓ n-gram: 88,085 n-grams across 42,837 contexts
-✓ Embeddings: 64-dim vectors for 125 chunks
-✓ Trained in 2.1s
+One chat prompt sits over both. Each turn is routed: the local models answer
+what they can, Claude answers the rest, and **every answer Claude gives is
+written into the local models on the next train**, so the local half covers more
+ground every week.
 
-$ pca complete --file src/ml/params.ts --line 118
-  › clipGradNorm(maxNorm: number): num▏
-  ▸ ber {                score 2.841  lm -0.42
 ```
+$ pca chat
+pca chat - local models first, Claude when it matters
+  168,492 tokens trained · 12 answers in memory · Claude available
+
+you › where is the retry logic?
+
+local  router p(claude)=0.11, 8 index hits
+From the local index, most relevant first:
+
+**src/lib/database.ts:14** (retryFailedUpload)
+…                                                         4ms, no network
+
+you › why does the upload retry twice?
+
+claude router p(claude)=0.88
+Because `retryFailedUpload` loops over `attempts` at src/lib/database.ts:14,
+and `uploadAll` already wraps it in its own retry at src/jobs/upload.ts:53.
+                                    ~$0.0071 · remembered, `/train` to learn it
+
+$ pca learn
+✓ Memory: 12 remembered answers folded in
+✓ Corpus: 168,492 tokens
+✓ Trained in 3.7s
+```
+
+Ask that second question again next week and it is answered locally, in
+milliseconds, offline, for nothing.
 
 ---
 
@@ -28,10 +48,12 @@ until then, invoke it directly:
 
 ```bash
 node dist/cli.js doctor                       # confirm setup
+node dist/cli.js chat                         # the conversation, local + Claude
+node dist/cli.js chat "where are gradients clipped?"   # one question, then exit
 node dist/cli.js complete "const user = await db."
 node dist/cli.js search "where are gradients clipped"
 node dist/cli.js neighbors tokenizer
-node dist/cli.js stats --weights
+node dist/cli.js stats --weights --router
 ```
 
 `npm run pca -- <args>` does the same thing via the package script. To get the
@@ -43,7 +65,11 @@ run `node dist/cli.js train` — a few seconds.
 
 **The Claude-backed commands (`ask`, `explain`, `review`, `refactor`) need
 `ANTHROPIC_API_KEY` and are disabled without it.** Everything above is local,
-offline, and needs no key. `doctor` tells you which half is live.
+offline, and needs no key — including `pca chat`, which simply stays on the
+local half and says so. `doctor` tells you which half is live.
+
+For the browser version of the chat, `pca serve --ui` and open
+<http://127.0.0.1:7717>. Same models, same memory, same daemon the editor uses.
 
 To use it on a *different* project, `cd` there and run `pca train` — models are
 stored per-project in `.pca/`, so nothing is shared between codebases.
@@ -75,10 +101,75 @@ So the split is:
 |---|---|---|
 | Inline completion, every keystroke | Local n-gram + reranker | Must be <10 ms; needs *your* symbols |
 | Semantic code search | Local embeddings + BM25 | Instant, offline, private |
+| Recalling something already answered | Local memory + embeddings | It is on disk; asking again is waste |
+| Deciding which of the two answers | Local online router | Learns from your corrections |
 | "Why does this break?", review, refactor | Claude Opus 5 | Needs real reasoning |
 | Learning your preferences | Local online ranker | Trains on your accept/reject, instantly |
 
 The local half works with no API key and no network.
+
+---
+
+## "so eventually I can use it just like Claude"
+
+That is the goal this chat layer was built for, so here is exactly what it does
+and does not deliver.
+
+**It will not turn the local model into Claude.** A 1.6M-parameter n-gram and
+transformer trained on one repository cannot reason. Training on Claude's
+answers does not transfer Claude's reasoning; that is not how distillation at
+this scale works, and any version of this README that claimed otherwise would be
+lying to you.
+
+**What it does do is move the boundary, permanently, in one direction.** Every
+answer Claude gives about your codebase is a fact about *your* system that now
+exists in writing. Store it and it is yours forever:
+
+```
+you ask  ──▶  router  ──▶  local models  ──▶  answer (0 ms, $0)
+                 │
+                 └──────▶  Claude  ──▶  answer  ──▶  .pca/lessons.jsonl
+                                                          │
+                          ┌───────────────────────────────┘
+                          ▼
+                     pca learn  ──▶  n-gram · embeddings · index · transformer
+                          │
+                          └──▶  the same question is local from now on
+```
+
+Three separate things happen to a stored answer, and they are worth separating
+because only two of them are surprising:
+
+1. **Recall.** Ask the same thing again, or a paraphrase, and the answer comes
+   back from disk in milliseconds with its original attribution and date. This
+   is the one that pays off immediately.
+2. **Retrieval.** Stored answers are indexed next to your source, so they ground
+   *future* Claude turns too. Claude reads what Claude already established about
+   your system instead of rediscovering it, which makes later answers both
+   better and cheaper.
+3. **Training.** The tokenizer, n-gram, embeddings and transformer all train on
+   the text. This is the weakest of the three — prose about your code is a small
+   fraction of a code corpus — but it is the one that makes `pca complete` aware
+   of vocabulary that appears in your discussions before it appears in your code.
+
+And the **router learns where the line is**. When it routes locally and you type
+`/claude`, that is a labelled example saying *escalate this shape of question*.
+When you accept the local answer and move on, that is the opposite label. It is
+a linear model, so you can read what it concluded:
+
+```
+$ pca stats --router
+  memoryTop            -4.000 ████████████████████████
+  locateShape          -2.500 ███████████████
+  editShape             2.500 ███████████████
+  reasonShape           2.000 ████████████
+  magenta pushes a turn to Claude, green keeps it local
+```
+
+So the honest version of "eventually use it just like Claude" is: **the
+interface is the same from day one, and the fraction of it that Claude has to
+answer goes down over time.** It does not reach zero. On questions that need
+real reasoning about code it has never seen, it should not.
 
 ---
 
@@ -128,10 +219,34 @@ $ pca stats --weights
   localFileHits         0.512 ██████
 ```
 
+**6. An online routing model** (`src/ml/router.ts`) — decides per chat turn
+whether the local models can answer. Logistic regression over ten features:
+memory similarity, retrieval strength, index coverage of the query's terms, and
+the shape of the question (a "where is" is a lookup, a "why does" is not). Its
+prior leans towards Claude on purpose — being wrong towards Claude costs a few
+cents, being wrong towards local costs a useless answer.
+
 Plus a **style profile** measured from your corpus — indentation, quote style,
 semicolons, naming convention, comment density — which is injected into every
 Claude prompt so generated code comes back looking like your code, not like a
 tutorial.
+
+### What the local half will and will not say
+
+The local models never write prose. An n-gram trained on TypeScript generates
+TypeScript, and a fluent-but-wrong English answer would be worse than no answer,
+so the local answerer is restricted to four things it is actually good at:
+
+| It says | When |
+|---|---|
+| A stored answer, verbatim and attributed | Memory matches on ≥2 content words and ≥0.45 similarity |
+| Code locations with `path:line` and excerpts | The index has hits |
+| Completions for a half-typed line | The message ends mid-expression |
+| Nearest tokens in the embedding space | You asked what relates to an identifier |
+| "I have nothing local on that" | None of the above |
+
+That last row is the important one. It is why the local half is always either
+useful or quiet, and never confidently wrong.
 
 ---
 
@@ -172,17 +287,54 @@ Run `pca doctor` to confirm everything is wired up.
 
 ## Use it
 
+### Chat
+
+```bash
+pca chat                                   # the conversation
+pca chat "where is the retry logic?"       # one question, then exit
+pca chat "explain the beam search" --effort max
+pca serve --ui                             # the same chat in a browser
+echo "where is X?" | pca chat              # piped, one question per line
+```
+
+Inside the chat:
+
+| | |
+|---|---|
+| `/claude` | Re-ask the last question with Claude. Teaches the router. |
+| `/claude <question>` | Send a new question straight to Claude |
+| `/local <question>` | Force the local models |
+| `/why` | How the last turn was routed, and on what evidence |
+| `/memory [query]` | What it remembers about this codebase |
+| `/train` | Fold new answers into the models, without leaving the chat |
+| `/stats` | Corpus, memory, router weights, session cost |
+| `/new` | Start a fresh conversation |
+
+Transcripts go to `.pca/chat/`, remembered answers to `.pca/lessons.jsonl`. Both
+are plain text you can read, grep, edit or delete.
+
+With no `ANTHROPIC_API_KEY` the chat still runs; every turn stays local and the
+banner says so.
+
 ### Train
 
 ```bash
 pca train                          # tokenizer, n-gram, index, embeddings (seconds)
-pca train --neural --minutes 10    # also train the transformer for 10 minutes
+pca learn                          # the same, plus everything chat has remembered
+pca learn --watch                  # keep retraining as you edit
+pca learn --minutes 10             # ... and continue the transformer for 10 min
+pca train --neural --minutes 10    # train the transformer for 10 minutes
 pca train --neural-only --resume   # continue training the transformer
 pca eval                           # measure quality on held-out files
 ```
 
 `pca train` is fast enough to re-run whenever you like — a few seconds on a
-mid-size repo. The transformer is the slow part and is strictly optional.
+mid-size repo. `pca learn` is `pca train` plus the chat memory, and is the one
+worth putting on a keybinding or leaving in `--watch` mode. The transformer is
+the slow part and is strictly optional.
+
+`--watch` debounces: a rebase or a find-and-replace fires hundreds of filesystem
+events and retrains once, at the end.
 
 ### Complete
 
@@ -219,6 +371,8 @@ command prints its token usage and estimated cost.
 
 ```bash
 pca stats --weights    # what is trained, and what it learned about you
+pca stats --router     # where it draws the local/Claude line, and why
+pca stats --memory     # the most recent answers it has stored
 pca doctor             # environment and setup check
 ```
 
@@ -231,6 +385,7 @@ difference between 70 ms and 2 ms per completion:
 
 ```bash
 pca serve            # http://127.0.0.1:7717, loopback only
+pca serve --ui       # ... and serve the browser chat client at /
 ```
 
 Then install the VS Code extension:
@@ -257,16 +412,25 @@ curl -s localhost:7717/complete -H 'content-type: application/json' \
 
 | Route | Method | Purpose |
 |---|---|---|
+| `/` | GET | The browser chat client (needs `--ui`) |
 | `/health` | GET | Readiness, which models are loaded, mean latency |
-| `/stats` | GET | Manifest, index stats, learned ranker weights |
+| `/stats` | GET | Manifest, index stats, ranker and router weights, memory size |
+| `/memory` | GET | `?q=` to search remembered answers, or the most recent |
 | `/complete` | POST | `{prefix, suffix?, filePath?, count?, neural?}` |
 | `/search` | POST | `{query, limit?}` |
+| `/chat` | POST | `{message, force?, sessionId?}` → server-sent events |
+| `/train` | POST | Retrain in place; the daemon reloads its own models |
 | `/feedback` | POST | `{accepted: number[], rejected?: number[][]}` |
 | `/shutdown` | POST | Stop the daemon |
 
-Set `PCA_TOKEN` before `pca serve` to require `Authorization: Bearer <token>`.
-The daemon binds to `127.0.0.1` only and is never intended to be reachable
-off-host.
+`/chat` streams `data:` frames of `{type: "route" | "thinking" | "text" | "done"
+| "error", ...}`, so any client can drive a conversation in about thirty lines.
+
+Set `PCA_TOKEN` before `pca serve` to require `Authorization: Bearer <token>`
+(or `?token=` for the browser, which cannot set a header on a page load). The
+daemon binds to `127.0.0.1` only, rejects requests whose `Host` is not a
+loopback name — a loopback bind alone does not stop DNS rebinding — and is never
+intended to be reachable off-host.
 
 ---
 
@@ -380,9 +544,9 @@ if any single element's gradient is wrong.
 ## How it fits together
 
 ```
-pca train
+pca train / pca learn
   walk (gitignore-aware)  →  tokenizer  →  n-gram
-                          →  chunker    →  BM25 index
+  + .pca/lessons.jsonl    →  chunker    →  BM25 index
                           →  embeddings →  chunk vectors
                           →  style profile
 
@@ -393,6 +557,14 @@ pca complete  (2.3 ms warm)
   3 RANK     linear reranker over both model scores,
              locality, retrieval and embedding features   ~0.5 ms
 
+pca chat
+  1 GROUND   hybrid retrieval + memory recall, one pass, shared    ~3 ms
+  2 ROUTE    logistic router over 10 features → local | claude
+  3a LOCAL   replay a stored answer · locate code · complete · neighbours
+  3b CLAUDE  history + retrieved code + memory → Claude Opus 5,
+             streaming, adaptive thinking, prompt caching
+  4 RECORD   the answer → .pca/lessons.jsonl → next `pca learn`
+
 pca ask / review / explain / refactor
   hybrid retrieval (BM25 ⊕ vectors, fused by RRF)
     → Claude Opus 5, streaming, adaptive thinking, prompt caching
@@ -401,13 +573,15 @@ pca ask / review / explain / refactor
 ```
 src/
   tokenizer/   lossless code tokenizer with byte fallback
-  ml/          ngram · transformer · embeddings · reranker · linalg · params
+  ml/          ngram · transformer · embeddings · reranker · router · linalg
   index/       walker · chunker · store (BM25 + vector + RRF)
-  core/        bundle · train · trainNeural · complete · evaluate · style
+  core/        bundle · train · trainNeural · complete · evaluate · style · watch
+  chat/        memory (lesson store) · local answerer · session + routing
   llm/         claude client · prompt construction
-  server/      loopback daemon
+  server/      loopback daemon (completion, search, chat, train)
+  web/         the browser chat client, one self-contained page
   commands/    CLI command implementations
-test/          52 tests: gradient checks, round-trips, retrieval, end-to-end
+test/          60 tests: gradient checks, round-trips, retrieval, chat, end-to-end
 bench/         latency, hyper-parameter sweeps
 editors/vscode inline-completion extension
 ```
@@ -431,15 +605,34 @@ incomparable scales, so they are combined by Reciprocal Rank Fusion over their
 
 **Prompt caching that actually hits.** The Claude system prompt contains only the
 role and the measured style profile, so it stays byte-identical across a session
-and the cached prefix is reused. Retrieved code goes in the user turn, after the
-breakpoint.
+and the cached prefix is reused. Retrieved code and recalled memory go in the
+*latest* user turn, after the breakpoint, so a growing conversation keeps hitting
+the cache instead of invalidating it.
+
+**Memory is append-only JSONL, not a database.** The write happens at the end of
+a streamed answer, where a crash is entirely possible; appending a line cannot
+corrupt the lines before it, and a half-written line is skipped on load. It is
+also greppable, editable and deletable with the tools you already have.
+
+**The router escalates on doubt.** Its prior leans towards Claude, and it only
+replays a stored answer when at least two content words match. Being wrong
+towards Claude costs a few cents. Being wrong towards local costs you a
+confident, useless answer, which is the failure mode that would make you stop
+trusting the tool.
+
+**Stopwords are stripped from memory recall but not from code search.**
+Questions are prose, where "where is X" and "why is X" share every word but the
+one that matters; identifiers are not. Scoring recall over raw words let a
+question about Kneser-Ney discounts match a stored answer about the locality
+weight on "where", "is" and "the" alone — caught by a smoke test against the
+real index, not by the unit tests, which is why that case is now one.
 
 ---
 
 ## Testing
 
 ```bash
-npm test                              # 52 tests
+npm test                              # 60 tests
 node bench/latency.mjs                # warm-path latency distribution
 node bench/sweep.mjs                  # suggestion length / evidence sweep
 node bench/tune-locality.mjs          # locality weight sweep
@@ -450,6 +643,15 @@ on Unicode/CRLF/NUL/emoji, that Kneser-Ney distributions sum to 1 and never
 assign zero mass, save/load round-trips for every model, retrieval ranking, and
 an end-to-end test that trains a real temp project and drives the daemon over
 HTTP including auth rejection and malformed input.
+
+The chat layer is tested the same way, against a real trained fixture rather
+than mocks: that a remembered answer is recalled by a paraphrase *and not* by an
+unrelated question, that remembered answers actually reach the corpus and the
+index, that escalating a turn moves the router's weights and persists them, that
+the file watcher retrains on a genuine filesystem event, and that the daemon
+serves the UI, streams a turn, rejects a non-loopback `Host`, and retrains on
+request. The Claude path runs against an injected fake backend, so the whole
+suite passes offline with no API key.
 
 ---
 
@@ -473,6 +675,21 @@ Recorded because they were judgement calls, not requirements:
 - **n-gram order 4 and a 2M-token cap by default.** The n-gram tables are held in
   memory during training; raise both with `--order` and `--max-tokens` if you
   have the RAM.
+- **"Connect my AI so I can use it just like Claude" was read as: put both
+  engines behind one chat interface, and close the loop so the local half grows
+  into more of it.** The alternative readings — train the transformer until it
+  can hold a conversation, or just add a `pca ask` alias — were rejected as,
+  respectively, not achievable at this scale and not an answer to the question.
+  What was built is the conventional middle: routing, memory, and training on
+  what memory collects. See ["so eventually I can use it just like
+  Claude"](#so-eventually-i-can-use-it-just-like-claude) for what that does and
+  does not get you.
+- **Local answers are not written to memory, only Claude's are.** Storing the
+  local half's own output would compound paraphrases of paraphrases, and a
+  recalled answer is already in memory by definition.
+- **Retrieval and memory are computed once per turn and shared** by the router,
+  the local answerer and the Claude prompt. One index query per message, not
+  three.
 
 ## Not built
 
@@ -486,6 +703,18 @@ Recorded because they were judgement calls, not requirements:
 - The reranker learns from real usage, so a fresh install ranks with hand-set
   priors. Those priors were swept on held-out data, but they are not *your*
   preferences until you have used it for a while.
+- **The router's priors have not been swept**, unlike the reranker's — that
+  needs a corpus of real routing decisions, which only exists after the tool has
+  been used. They are reasoned defaults that start biased towards Claude, and
+  they move as you correct them.
+- **No measurement yet of how far memory moves the local share.** The mechanism
+  is tested; the *effect* needs a few weeks of real use to quantify, and quoting
+  a number from a synthetic fixture would be meaningless. `pca stats --router`
+  shows the running local/Claude split so you can watch it yourself.
+- Memory recall is lexical overlap plus SIF-embedding cosine, which is adequate
+  for hundreds of answers. At tens of thousands it would want a real ANN index.
+- Chat has no tool use: it reads your codebase and answers, but it does not edit
+  files. `pca refactor --write` is still the way to apply a change.
 
 ## License
 

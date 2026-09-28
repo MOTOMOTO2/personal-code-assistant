@@ -106,7 +106,7 @@ Return the complete revised file in a single fenced code block, then a short bul
  * Build a retrieval query from a natural-language request. Strips filler words
  * that BM25 would otherwise waste weight on.
  */
-const STOPWORDS = new Set([
+export const STOPWORDS = new Set([
   "the", "a", "an", "is", "are", "was", "were", "do", "does", "did", "how",
   "what", "where", "when", "why", "who", "which", "can", "could", "should",
   "would", "i", "we", "you", "it", "this", "that", "these", "those", "and",

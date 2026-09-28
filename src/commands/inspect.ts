@@ -244,7 +244,8 @@ export async function cmdDoctor(): Promise<number> {
   const memory = loadLessons(bundle);
   check(
     memory.size > 0,
-    `${memory.size} answers in memory (folded into the models by \`pca learn\`)`,
+    `${memory.size} answer${memory.size === 1 ? "" : "s"} in memory ` +
+      "(folded into the models by `pca learn`)",
     "memory empty - `pca chat` fills it as you use the assistant",
     true,
   );

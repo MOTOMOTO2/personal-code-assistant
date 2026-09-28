@@ -13,7 +13,12 @@ import {
   loadLessons,
   newLessonId,
 } from "../src/chat/memory.js";
-import { LocalAssistant, buildTurnContext, isCodeContinuation } from "../src/chat/local.js";
+import {
+  LocalAssistant,
+  buildTurnContext,
+  isCodeContinuation,
+  isStrongRecall,
+} from "../src/chat/local.js";
 import { Router, routerFeatureIndex } from "../src/ml/router.js";
 import { StreamOptions, StreamResult } from "../src/llm/claude.js";
 import { loadCorpus, trainProject } from "../src/core/train.js";
@@ -145,6 +150,21 @@ test("memory round-trips and recalls by meaning as well as by word", (t) => {
   // The unrelated lesson must not outrank the relevant one.
   const other = store.recall("session expiry", { tokenizer: bundle.tokenizer });
   assert.match(other[0].lesson.question, /sessions expire/);
+
+  // Stopwords must not carry a recall. "where/is/the" are shared with both
+  // stored questions, and scoring over raw words let that alone clear the
+  // replay threshold when the store was small.
+  const unrelated = store.recall("where is the Kneser-Ney discount estimated?", {
+    tokenizer: bundle.tokenizer,
+    embeddings: bundle.embeddings,
+  });
+  for (const r of unrelated) {
+    assert.ok(
+      !isStrongRecall(r),
+      `"${r.lesson.question}" should not be replayed (score ${r.score.toFixed(2)}, ` +
+        `${r.matchedTerms} terms)`,
+    );
+  }
 
   assert.deepEqual(extractCites("see src/uploader.ts:2 and src/uploader.ts:2"), ["src/uploader.ts:2"]);
 });

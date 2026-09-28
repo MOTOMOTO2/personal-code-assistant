@@ -114,6 +114,19 @@ export function routeFeatures(
 }
 
 /**
+ * Whether a recalled answer is close enough to replay as *the* answer.
+ *
+ * Two terms, not one: replaying a stored answer is the strongest claim the
+ * local half makes, and one shared content word is a coincidence. A single term
+ * only qualifies when it dominates the query outright - asking about one rare
+ * identifier by name.
+ */
+export function isStrongRecall(recall: Recall): boolean {
+  if (recall.score < 0.45) return false;
+  return recall.matchedTerms >= 2 || recall.score >= 0.9;
+}
+
+/**
  * A message is code to continue if it ends mid-expression the way a half-typed
  * line does. Deliberately conservative: answering a question with a code
  * completion is worse than the reverse, so this only fires on a single line
@@ -143,7 +156,7 @@ export class LocalAssistant {
     if (ctx.looksLikeCode && this.bundle.isTrained) return this.complete(ctx.question);
 
     const best = ctx.recalls[0];
-    if (best && best.score >= 0.45) return this.fromMemory(best);
+    if (best && isStrongRecall(best)) return this.fromMemory(best);
     if (ctx.hits.length > 0) return this.locate(ctx, best);
     if (best) return this.fromMemory(best);
 

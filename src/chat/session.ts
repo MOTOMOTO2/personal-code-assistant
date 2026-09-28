@@ -4,7 +4,7 @@ import { Bundle } from "../core/bundle.js";
 import { ClaudeClient, Effort, StreamOptions, StreamResult, hasCredentials } from "../llm/claude.js";
 import { renderContext, systemPrompt } from "../llm/prompts.js";
 import { statePath } from "../util/paths.js";
-import { LocalAssistant, TurnContext, buildTurnContext } from "./local.js";
+import { LocalAssistant, TurnContext, buildTurnContext, isStrongRecall } from "./local.js";
 import { Lesson, LessonStore, appendLesson, extractCites, loadLessons, newLessonId } from "./memory.js";
 
 /**
@@ -338,7 +338,7 @@ function collapseRoles(
 
 function routeReason(ctx: TurnContext, pClaude: number): string {
   const top = ctx.recalls[0];
-  if (top && top.score >= 0.45) return `memory hit ${(top.score * 100).toFixed(0)}%`;
+  if (top && isStrongRecall(top)) return `memory hit ${(top.score * 100).toFixed(0)}%`;
   if (ctx.looksLikeCode) return "looks like code to continue";
   if (pClaude >= 0.5) return `router p(claude)=${pClaude.toFixed(2)}`;
   return `router p(claude)=${pClaude.toFixed(2)}, ${ctx.hits.length} index hits`;
