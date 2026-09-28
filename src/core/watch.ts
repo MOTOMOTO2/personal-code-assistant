@@ -5,7 +5,7 @@ import { TrainOptions, TrainReport, loadCorpus, trainProject } from "./train.js"
 import { trainNeural } from "./trainNeural.js";
 import { ALWAYS_SKIP_DIRS, CODE_EXTENSIONS } from "../index/walker.js";
 import { Workspace } from "../util/paths.js";
-import { color, fmtDuration, info, ok, warn } from "../util/log.js";
+import { color, fmtDuration, info, isQuiet, ok, setQuiet, warn } from "../util/log.js";
 
 /**
  * Continuous training.
@@ -102,8 +102,14 @@ export function startWatcher(ws: Workspace, opts: WatchOptions = {}): Watcher {
     running = true;
     pending = new Set();
     const started = performance.now();
+    // The first pass is worth watching - it is the one that takes seconds on a
+    // cold repo. After that, a full training log on every file save is noise,
+    // so only the one-line summary survives.
+    const wasQuiet = isQuiet();
+    if (state.cycles > 0) setQuiet(true);
     try {
       const report = trainProject(bundle, opts.train ?? {});
+      setQuiet(wasQuiet);
       state.cycles++;
       ok(
         `retrained: ${report.files} files, ${report.corpusTokens.toLocaleString()} tokens, ` +
@@ -118,6 +124,7 @@ export function startWatcher(ws: Workspace, opts: WatchOptions = {}): Watcher {
       opts.onError?.(err as Error);
       warn(`retrain failed: ${(err as Error).message}`);
     } finally {
+      setQuiet(wasQuiet);
       running = false;
     }
     if (maxCycles > 0 && state.cycles >= maxCycles) state.close();

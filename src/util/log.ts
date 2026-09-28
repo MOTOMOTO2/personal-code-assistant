@@ -18,6 +18,10 @@ export function setQuiet(q: boolean): void {
   quiet = q;
 }
 
+export function isQuiet(): boolean {
+  return quiet;
+}
+
 /** Human-facing status output. Goes to stderr so stdout stays pipe-clean. */
 export function info(msg: string): void {
   if (!quiet) process.stderr.write(`${msg}\n`);
