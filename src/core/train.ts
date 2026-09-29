@@ -8,6 +8,7 @@ import { EmbeddingModel, normalize } from "../ml/embeddings.js";
 import { NgramModel } from "../ml/ngram.js";
 import { Tokenizer } from "../tokenizer/tokenizer.js";
 import { loadLessons } from "../chat/memory.js";
+import { CorpusSource, SourceStats, loadSources, readSources } from "./sources.js";
 import { ensureStateDir } from "../util/paths.js";
 import { fmtDuration, ok, progress, progressDone, step, warn } from "../util/log.js";
 import { humanBytes } from "../util/io.js";
@@ -32,6 +33,12 @@ export interface TrainOptions {
   skipIndex?: boolean;
   /** Include remembered chat answers in the corpus and index. Default true. */
   includeLessons?: boolean;
+  /**
+   * Train on the directories registered with `pca corpus add` as well as this
+   * project. Default true; `--no-sources` turns it off for one run without
+   * unregistering anything.
+   */
+  includeSources?: boolean;
 }
 
 export interface TrainReport {
@@ -45,6 +52,10 @@ export interface TrainReport {
   valFiles: number;
   /** Remembered answers folded into the corpus. */
   lessons: number;
+  /** Per-source contribution from `pca corpus`. */
+  sources: SourceStats[];
+  /** Tokens of the corpus that came from external sources. */
+  sourceTokens: number;
   seconds: number;
 }
 
@@ -87,6 +98,10 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
   // --- read once, reuse everywhere -------------------------------------
   const texts: string[] = [];
   const kept: SourceFile[] = [];
+  /** Parallel to `kept`: whether the document belongs in the retrieval index. */
+  const indexable: boolean[] = [];
+  /** Parallel to `kept`: source name for external documents, null for your own. */
+  const origin: Array<string | null> = [];
   const style = new StyleAnalyzer();
   for (let i = 0; i < files.length; i++) {
     if ((i & 31) === 0) progress(`reading ${i + 1}/${files.length}`);
@@ -98,19 +113,25 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
     }
     texts.push(text);
     kept.push(files[i]);
+    indexable.push(true);
+    origin.push(null);
     style.add(text, path.extname(files[i].rel).toLowerCase());
   }
   progressDone();
+  // The style profile is measured from your code alone. It is what the
+  // completer imitates - quote style, indent width, semicolons - so letting a
+  // borrowed repository vote on it would make the assistant write like someone
+  // else in your own files.
   bundle.setStyle(style.finish());
 
-  const trainIdx: number[] = [];
+  const projectTrainIdx: number[] = [];
   const valIdx: number[] = [];
   for (let i = 0; i < kept.length; i++) {
-    (isValidationFile(kept[i].rel, valFraction) ? valIdx : trainIdx).push(i);
+    (isValidationFile(kept[i].rel, valFraction) ? valIdx : projectTrainIdx).push(i);
   }
-  if (trainIdx.length === 0) {
+  if (projectTrainIdx.length === 0) {
     // Tiny repo: a held-out split would leave nothing to learn from.
-    trainIdx.push(...valIdx.splice(0, valIdx.length));
+    projectTrainIdx.push(...valIdx.splice(0, valIdx.length));
   }
 
   // --- memory -----------------------------------------------------------
@@ -118,11 +139,11 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
   // after the style profile is measured (prose must not skew the code style)
   // and always land in the training split - holding out an answer to evaluate
   // perplexity on it would measure nothing useful.
-  let lessonCount = 0;
+  const lessonIdx: number[] = [];
   if (opts.includeLessons !== false) {
     const docs = loadLessons(bundle).documents();
     for (const doc of docs) {
-      trainIdx.push(texts.length);
+      lessonIdx.push(texts.length);
       texts.push(doc.text);
       kept.push({
         abs: bundle.path("lessons"),
@@ -130,10 +151,50 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
         size: Buffer.byteLength(doc.text, "utf8"),
         mtimeMs: Date.now(),
       });
-      lessonCount++;
+      indexable.push(true);
+      origin.push(null);
     }
-    if (lessonCount > 0) ok(`Memory: ${lessonCount} remembered answers folded in`);
+    if (lessonIdx.length > 0) ok(`Memory: ${lessonIdx.length} remembered answers folded in`);
   }
+
+  // --- external sources -------------------------------------------------
+  // Directories registered with `pca corpus add`: other repositories of yours,
+  // or libraries you write against. They never join the validation split,
+  // because the question this project measures is how well it predicts *your*
+  // code, and scoring that on someone else's would answer a different one.
+  const sourceIdx: number[] = [];
+  let sourceStats: SourceStats[] = [];
+  let registered: CorpusSource[] = [];
+  if (opts.includeSources !== false) {
+    registered = loadSources(bundle.ws);
+    if (registered.length > 0) {
+      step(`Reading ${registered.length} extra corpus source${registered.length === 1 ? "" : "s"}`);
+      const { docs, stats } = readSources(registered, (msg) => progress(msg));
+      progressDone();
+      sourceStats = stats;
+      for (const doc of docs) {
+        sourceIdx.push(texts.length);
+        texts.push(doc.text);
+        kept.push({ abs: doc.abs, rel: doc.rel, size: doc.size, mtimeMs: doc.mtimeMs });
+        indexable.push(doc.index);
+        origin.push(doc.source);
+      }
+      for (const s of stats) {
+        if (s.missing) continue;
+        ok(
+          `Source @${s.name}: ${s.files} files (${humanBytes(s.bytes)})` +
+            (s.truncated ? " - token budget reached, rest skipped" : ""),
+        );
+      }
+    }
+  }
+
+  // Corpus priority, which decides what survives the token cap: remembered
+  // answers first (a handful of documents, and the densest per token), then
+  // your code, then borrowed code. Anything that has to be dropped should be
+  // the least specific to you, and this ordering guarantees that.
+  const trainIdx = [...lessonIdx, ...projectTrainIdx, ...sourceIdx];
+  const lessonCount = lessonIdx.length;
 
   // --- tokenizer --------------------------------------------------------
   step(`Learning vocabulary (target ${vocabSize} pieces)`);
@@ -148,6 +209,7 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
   step("Encoding corpus");
   const encoded: number[][] = [];
   let corpusTokens = 0;
+  let sourceTokens = 0;
   const fileTokens = new Map<string, number>();
   for (let n = 0; n < trainIdx.length; n++) {
     const i = trainIdx[n];
@@ -159,15 +221,26 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
       if (room > 0) {
         encoded.push(ids.slice(0, room));
         corpusTokens += room;
+        if (origin[i] !== null) sourceTokens += room;
       }
-      warn(`Corpus token cap reached (${maxTokens}); remaining files skipped for LM training`);
+      warn(
+        `Corpus token cap reached (${maxTokens.toLocaleString()}); ` +
+          `${trainIdx.length - n} documents skipped for LM training. ` +
+          "Raise it with --max-tokens, or lower a source budget in .pca/sources.json.",
+      );
       break;
     }
     encoded.push(ids);
     corpusTokens += ids.length;
+    if (origin[i] !== null) sourceTokens += ids.length;
   }
   progressDone();
-  ok(`Corpus: ${corpusTokens.toLocaleString()} tokens`);
+  ok(
+    `Corpus: ${corpusTokens.toLocaleString()} tokens` +
+      (sourceTokens > 0
+        ? ` (${(corpusTokens - sourceTokens).toLocaleString()} yours, ${sourceTokens.toLocaleString()} from sources)`
+        : ""),
+  );
 
   // --- n-gram -----------------------------------------------------------
   step(`Training ${order}-gram model (Kneser-Ney)`);
@@ -196,12 +269,14 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
     const chunks: IndexedChunk[] = [];
     for (let i = 0; i < kept.length; i++) {
       if ((i & 31) === 0) progress(`chunking ${i + 1}/${kept.length}`);
+      if (!indexable[i]) continue; // source registered with --no-index
       const fileIdx = indexFiles.length;
       indexFiles.push({
         path: kept[i].rel,
         size: kept[i].size,
         mtimeMs: kept[i].mtimeMs,
         tokens: fileTokens.get(kept[i].rel) ?? 0,
+        ...(origin[i] !== null ? { external: origin[i] as string } : {}),
       });
       for (const c of chunkFile(texts[i])) {
         chunks.push({
@@ -273,6 +348,8 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
     embeddingDim: embeddingDimUsed,
     valFiles: valIdx.length,
     lessons: lessonCount,
+    sources: sourceStats,
+    sourceTokens,
     seconds,
   };
 }
@@ -286,6 +363,7 @@ export function loadCorpus(
   valFraction = 0.08,
   extraExtensions?: string[],
   includeLessons = true,
+  includeSources = true,
 ): { train: number[][]; val: number[][]; trainPaths: string[]; valPaths: string[] } {
   const tokenizer = bundle.tokenizer;
   const files = walkSources(bundle.ws.root, { extraExtensions });
@@ -316,6 +394,16 @@ export function loadCorpus(
       if (ids.length < 8) continue;
       train.push(ids);
       trainPaths.push(doc.path);
+    }
+  }
+  if (includeSources) {
+    // Always training, never validation - see the note in `trainProject`.
+    const { docs } = readSources(loadSources(bundle.ws));
+    for (const doc of docs) {
+      const ids = tokenizer.encode(doc.text);
+      if (ids.length < 8) continue;
+      train.push(ids);
+      trainPaths.push(doc.rel);
     }
   }
   if (train.length === 0 && val.length > 0) {

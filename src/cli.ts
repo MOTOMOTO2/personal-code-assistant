@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { cmdChat } from "./commands/chat.js";
 import { cmdComplete } from "./commands/complete.js";
+import { cmdCorpus } from "./commands/corpus.js";
 import { cmdLearn } from "./commands/learn.js";
 import { cmdDoctor, cmdNeighbors, cmdSearch, cmdStats } from "./commands/inspect.js";
 import { cmdAsk, cmdExplain, cmdRefactor, cmdReview } from "./commands/llm.js";
@@ -30,6 +31,12 @@ ${color.bold("Train")}
   pca train --neural --minutes 10  Also train the transformer, for 10 minutes
   pca train --neural-only --resume Continue training the transformer only
   pca eval                       Measure quality on held-out files
+  pca eval --curve               Measure whether more code would still help
+
+${color.bold("Feed it")} ${color.dim("(what it learns from, beyond this project)")}
+  pca corpus                     Where the corpus comes from, broken down
+  pca corpus add ../other-repo   Train on another directory too
+  pca corpus remove other-repo   Stop training on it
 
 ${color.bold("Use locally")} ${color.dim("(no network, no API key)")}
   pca complete --file src/a.ts --line 42 [--col 18]
@@ -67,6 +74,7 @@ const COMMANDS: Record<string, Handler> = {
   train: cmdTrain,
   learn: cmdLearn,
   eval: cmdEval,
+  corpus: cmdCorpus,
   complete: cmdComplete,
   search: cmdSearch,
   neighbors: cmdNeighbors,

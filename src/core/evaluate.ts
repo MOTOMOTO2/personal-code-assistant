@@ -2,8 +2,9 @@ import { Bundle } from "./bundle.js";
 import { CompletionEngine } from "./complete.js";
 import { Lesson, LessonStore } from "../chat/memory.js";
 import { LocalAssistant, buildTurnContext } from "../chat/local.js";
+import { NgramModel } from "../ml/ngram.js";
 import { Rng } from "../util/rng.js";
-import { progress, progressDone } from "../util/log.js";
+import { progress, progressDone, step } from "../util/log.js";
 
 /**
  * Held-out evaluation. Without this, "training" is just a progress bar.
@@ -111,7 +112,11 @@ export function evalRouting(bundle: Bundle, lessons: Lesson[]): RoutingMetrics {
 
 /** Next-token metrics for the n-gram model over held-out documents. */
 export function evalNgram(bundle: Bundle, docs: number[][], maxTokens = 20_000): TokenMetrics {
-  const ngram = bundle.ngram;
+  return scoreNgram(bundle.ngram, docs, maxTokens);
+}
+
+/** The same, for a model that is not the one on disk - used by the learning curve. */
+export function scoreNgram(ngram: NgramModel, docs: number[][], maxTokens = 20_000): TokenMetrics {
   let logProbSum = 0;
   let n = 0;
   let top1 = 0;
@@ -319,6 +324,140 @@ export function evalLineCompletion(
     meanOfferedChars: taken > 0 ? offeredChars / taken : 0,
     meanLatencyMs: latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0,
     p95LatencyMs: latencies.length > 0 ? latencies[Math.floor(latencies.length * 0.95)] ?? 0 : 0,
+  };
+}
+
+export interface CurvePoint {
+  /** Share of the training corpus used. */
+  fraction: number;
+  documents: number;
+  tokens: number;
+  perplexity: number;
+  top1: number;
+  top5: number;
+}
+
+/**
+ * Retrain the n-gram on growing slices of the corpus and score each one on the
+ * same held-out files.
+ *
+ * This is the only honest way to answer "how much more data do I need". The
+ * alternative is to guess, and guesses about this are usually wrong by an order
+ * of magnitude in whichever direction is more flattering. The curve says
+ * plainly whether the model is still data-starved (accuracy climbing steeply
+ * between slices) or saturated (the last doubling bought almost nothing), and
+ * therefore whether adding another repository is worth the disk.
+ *
+ * Only the n-gram is swept. It trains by counting, so five slices cost about
+ * what one `pca train` costs, and it is the model that actually serves inline
+ * completion. Sweeping the transformer would take hours and answer a question
+ * nobody asked.
+ */
+export function evalLearningCurve(
+  bundle: Bundle,
+  train: number[][],
+  val: number[][],
+  opts: { fractions?: number[]; order?: number; maxTokens?: number; seed?: number } = {},
+): CurvePoint[] {
+  const fractions = opts.fractions ?? [0.125, 0.25, 0.5, 1];
+  const order = opts.order ?? bundle.manifest?.ngramOrder ?? 4;
+  const vocabSize = bundle.tokenizer.vocabSize;
+
+  // One fixed shuffle, sliced as prefixes, so every larger slice is a superset
+  // of every smaller one. Independently sampled slices would let a lucky draw
+  // at 25% beat an unlucky one at 50% and make the curve read as noise.
+  const shuffled = train.slice();
+  new Rng(opts.seed ?? 20250928).shuffle(shuffled);
+
+  const points: CurvePoint[] = [];
+  for (const fraction of fractions) {
+    const take = Math.max(1, Math.round(shuffled.length * fraction));
+    const slice = shuffled.slice(0, take);
+    step(`Learning curve: ${(fraction * 100).toFixed(0)}% of corpus (${take} documents)`);
+    const ngram = new NgramModel({ order });
+    ngram.vocabSize = vocabSize;
+    let tokens = 0;
+    for (let i = 0; i < slice.length; i++) {
+      if ((i & 31) === 0) progress(`counting ${i + 1}/${slice.length}`);
+      ngram.observe(slice[i]);
+      tokens += slice[i].length;
+    }
+    ngram.finalize();
+    progressDone();
+    const m = scoreNgram(ngram, val, opts.maxTokens ?? 8000);
+    points.push({
+      fraction,
+      documents: take,
+      tokens,
+      perplexity: m.perplexity,
+      top1: m.top1,
+      top5: m.top5,
+    });
+  }
+  return points;
+}
+
+export interface ScalingFit {
+  /** Fitted exponent in error = A · tokens^(-alpha). Bigger means data helps more. */
+  alpha: number;
+  A: number;
+  /** Goodness of fit in log-log space, 0..1. Below ~0.8 the projection is noise. */
+  r2: number;
+  /** Corpus size needed for a given top-1 accuracy, or null if unreachable. */
+  tokensFor: (top1: number) => number | null;
+}
+
+/**
+ * Fit a power law to the curve: top-1 error falls as A · N^(-alpha) in corpus
+ * size N. This is the standard empirical form for language-model scaling, and
+ * fitting it lets the curve be read forwards - "another 5x of corpus buys about
+ * this much" - instead of only backwards.
+ *
+ * It is an extrapolation from four points on one machine, so it is a planning
+ * number, not a promise, and `r2` is returned so callers can refuse to show it
+ * when the points do not actually lie on a line.
+ */
+export function fitScalingLaw(points: CurvePoint[]): ScalingFit | null {
+  const usable = points.filter((p) => p.tokens > 0 && p.top1 > 0 && p.top1 < 1);
+  if (usable.length < 2) return null;
+
+  const xs = usable.map((p) => Math.log(p.tokens));
+  const ys = usable.map((p) => Math.log(1 - p.top1));
+  const n = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
+  let sxx = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (xs[i] - meanX) * (ys[i] - meanY);
+    sxx += (xs[i] - meanX) ** 2;
+  }
+  if (sxx === 0) return null;
+  const slope = sxy / sxx;
+  const intercept = meanY - slope * meanX;
+
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < n; i++) {
+    ssRes += (ys[i] - (intercept + slope * xs[i])) ** 2;
+    ssTot += (ys[i] - meanY) ** 2;
+  }
+  const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+  const alpha = -slope;
+  const A = Math.exp(intercept);
+  return {
+    alpha,
+    A,
+    r2,
+    tokensFor(top1: number): number | null {
+      const err = 1 - top1;
+      // A non-positive exponent means more data was not helping over the
+      // measured range; projecting from it would invent a number.
+      if (err <= 0 || alpha <= 0) return null;
+      const tokens = Math.exp((Math.log(A) - Math.log(err)) / alpha);
+      return Number.isFinite(tokens) ? tokens : null;
+    },
   };
 }
 

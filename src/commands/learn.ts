@@ -28,6 +28,7 @@ export async function cmdLearn(args: ParsedArgs): Promise<number> {
     valFraction,
     extraExtensions,
     includeLessons: !flagBool(args, "no-memory"),
+    includeSources: flagBool(args, "sources", true),
     ...(args.flags.has("vocab") ? { vocabSize: flagNumber(args, "vocab", 8192) } : {}),
     ...(args.flags.has("order") ? { order: flagNumber(args, "order", 4) } : {}),
   };
@@ -50,6 +51,9 @@ export async function cmdLearn(args: ParsedArgs): Promise<number> {
   info(`  ${color.dim("files")}      ${report.files}`);
   info(`  ${color.dim("memory")}     ${report.lessons} answers folded in`);
   info(`  ${color.dim("corpus")}     ${report.corpusTokens.toLocaleString()} tokens`);
+  if (report.sourceTokens > 0) {
+    info(`  ${color.dim("sources")}    ${report.sourceTokens.toLocaleString()} tokens from ${report.sources.length}`);
+  }
   info(`  ${color.dim("chunks")}     ${report.chunks.toLocaleString()}`);
   if (before) {
     const delta = report.corpusTokens - before.corpusTokens;

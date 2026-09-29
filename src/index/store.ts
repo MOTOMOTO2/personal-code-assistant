@@ -36,6 +36,12 @@ export interface IndexedFile {
   mtimeMs: number;
   /** Token count contributed to the language-model corpus. */
   tokens: number;
+  /**
+   * Name of the `pca corpus` source this file came from, absent for your own
+   * code. The path is already prefixed `@name/`, so this is for filtering and
+   * counting rather than display.
+   */
+  external?: string;
 }
 
 interface Bm25Data {

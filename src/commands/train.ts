@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import { Bundle } from "../core/bundle.js";
-import { evalLineCompletion, evalNeuralAndHybrid, evalNgram, evalRouting } from "../core/evaluate.js";
+import {
+  CurvePoint,
+  evalLearningCurve,
+  evalLineCompletion,
+  evalNeuralAndHybrid,
+  evalNgram,
+  evalRouting,
+  fitScalingLaw,
+} from "../core/evaluate.js";
 import { loadLessons } from "../chat/memory.js";
 import { loadCorpus, trainProject } from "../core/train.js";
 import { trainNeural } from "../core/trainNeural.js";
@@ -29,10 +37,18 @@ export async function cmdTrain(args: ParsedArgs): Promise<number> {
       valFraction,
       extraExtensions,
       skipIndex: flagBool(args, "skip-index"),
+      includeSources: flagBool(args, "sources", true),
     });
     info("");
     info(`  ${color.dim("files")}      ${report.files} (${humanBytes(report.bytes)})`);
     info(`  ${color.dim("corpus")}     ${report.corpusTokens.toLocaleString()} tokens`);
+    for (const s of report.sources) {
+      if (s.missing) continue;
+      info(
+        `  ${color.dim(`@${s.name}`.padEnd(10))} ${s.files} files, ${humanBytes(s.bytes)}` +
+          (s.truncated ? color.dim(" (budget reached)") : ""),
+      );
+    }
     info(`  ${color.dim("vocabulary")} ${report.vocabSize}`);
     info(
       `  ${color.dim("n-gram")}     order ${report.ngram.order}, ${report.ngram.ngrams.toLocaleString()} n-grams`,
@@ -185,10 +201,96 @@ export async function cmdEval(args: ParsedArgs): Promise<number> {
     );
   }
 
+  let curve: CurvePoint[] | null = null;
+  if (flagBool(args, "curve")) {
+    curve = evalLearningCurve(bundle, corpus.train, valDocs, {
+      maxTokens: flagNumber(args, "curve-tokens", 8000),
+    });
+    printCurve(curve);
+  } else {
+    info(
+      color.dim(
+        "`pca eval --curve` retrains on growing slices of the corpus and reports\n" +
+          "whether more code would still help. That is the question `pca corpus add` answers.\n",
+      ),
+    );
+  }
+
   if (flagBool(args, "json")) {
-    process.stdout.write(`${JSON.stringify({ ngram, neural, hybrid, line, routing }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ ngram, neural, hybrid, line, routing, curve }, null, 2)}\n`,
+    );
   }
   return 0;
+}
+
+/**
+ * The learning curve, plus what it projects. Printed with the fit quality
+ * attached, because an extrapolation whose points do not lie on a line is a
+ * number-shaped opinion and should not be presented as anything else.
+ */
+function printCurve(curve: CurvePoint[]): void {
+  info("");
+  info(color.bold("Does more code help? (n-gram retrained on slices of the corpus)"));
+  const rows: Array<[string, string, string, string]> = [
+    ["corpus", "tokens", "top-1", "perplexity"],
+  ];
+  for (const p of curve) {
+    rows.push([
+      `${(p.fraction * 100).toFixed(0)}%`,
+      p.tokens.toLocaleString(),
+      pct(p.top1),
+      fmt(p.perplexity),
+    ]);
+  }
+  printTable(rows);
+
+  const last = curve[curve.length - 1];
+  const prev = curve.length > 1 ? curve[curve.length - 2] : null;
+  if (prev) {
+    const gain = last.top1 - prev.top1;
+    const factor = prev.tokens > 0 ? last.tokens / prev.tokens : 0;
+    info(
+      `  ${color.dim("last")} ${factor.toFixed(1)}x of corpus bought ${(gain * 100).toFixed(1)} points of top-1`,
+    );
+  }
+
+  const fit = fitScalingLaw(curve);
+  if (!fit) return;
+  if (fit.r2 < 0.8) {
+    info(
+      color.dim(
+        `  Points are too noisy to extrapolate from (r² ${fit.r2.toFixed(2)}); ` +
+          "re-run with more held-out files.",
+      ),
+    );
+    return;
+  }
+  info("");
+  info(`  ${color.dim("scaling")}  error ∝ tokens^-${fit.alpha.toFixed(3)}  (r² ${fit.r2.toFixed(2)})`);
+  for (const target of [last.top1 + 0.05, last.top1 + 0.1]) {
+    if (target >= 0.95) continue;
+    const need = fit.tokensFor(target);
+    if (need === null || !Number.isFinite(need)) continue;
+    const multiple = need / Math.max(1, last.tokens);
+    info(
+      `  ${color.dim("projected")} ${pct(target)} top-1 needs ~${abbrev(need)} tokens ` +
+        `(${multiple < 100 ? `${multiple.toFixed(1)}x` : `${Math.round(multiple)}x`} this corpus)`,
+    );
+  }
+  info(
+    color.dim(
+      "  Extrapolated from four points on one machine: a planning number, not a promise.",
+    ),
+  );
+  info("");
+}
+
+function abbrev(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}k`;
+  return n.toFixed(0);
 }
 
 function fallbackTexts(root: string): Array<{ path: string; text: string }> {
