@@ -36,6 +36,9 @@ export async function cmdCorpus(args: ParsedArgs): Promise<number> {
   switch (sub) {
     case undefined:
       return showCorpus();
+    case "help":
+      process.stdout.write(USAGE);
+      return 0;
     case "list":
       return listSources();
     case "add":

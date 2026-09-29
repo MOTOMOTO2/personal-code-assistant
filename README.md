@@ -54,6 +54,8 @@ node dist/cli.js complete "const user = await db."
 node dist/cli.js search "where are gradients clipped"
 node dist/cli.js neighbors tokenizer
 node dist/cli.js stats --weights --router
+node dist/cli.js corpus                       # what it is learning from
+node dist/cli.js eval --curve                 # whether more code would help
 ```
 
 `npm run pca -- <args>` does the same thing via the package script. To get the
@@ -204,6 +206,129 @@ the same problem from the other direction: both sit near 1.0 for any question
 about a repository you have indexed, so their weights were acting as a second
 bias term and drowning out question shape. Both are fixed, and the two numbers
 now agree.
+
+---
+
+## Feeding it: what to train on, and how long until it helps
+
+Short version: **code, your own answers, and more code.** Not videos, not
+courses, not tutorials. The reason is mechanical rather than snobbish, and it is
+worth understanding before you spend a weekend on the wrong thing.
+
+### Why videos cannot be training data here
+
+Every model in this project predicts **the next token of code**. That is the
+entire learning signal. A video has no tokens in it; transcribed, an hour of
+someone talking is roughly **10,000 tokens of English prose about code**.
+
+Put that next to what the corpus already holds:
+
+| Source | Tokens | What the model learns from it |
+|---|---:|---|
+| This repository | ~195,000 | how *your* code is written |
+| One hour of video, transcribed | ~10,000 | how English sentences about code are written |
+| A mid-size library you depend on | ~400,000 | idioms you are about to type |
+
+A hundred hours of tutorial would be a *fifth* of one repository, and the wrong
+fifth: prose teaches a code model the statistics of English, which it will then
+happily suggest in the middle of your TypeScript. Video is an excellent way for
+**you** to learn and a useless way to train **this**. The same goes for blog
+posts and course material. Documentation is a partial exception — `.md` files are
+indexed, so prose is genuinely useful for *search* — but it is weak fuel for
+completion, which is why the style profile ignores it.
+
+### The three things that actually feed it
+
+```bash
+# 1. Your code. Automatic - it is whatever repo you run `pca train` in.
+pca train
+
+# 2. Your answers. Every Claude reply is stored and folded back in.
+pca learn
+
+# 3. Other people's code, in the languages you actually use.
+pca corpus add ../my-other-project
+pca corpus add ~/src/some-library --max-tokens 200000
+pca corpus                          # see the whole corpus, broken down
+```
+
+The third is new, and it is the lever you control. A source is any directory
+elsewhere on disk: another project of yours, a library you write against, a
+codebase whose style you are trying to absorb. It is walked by the same rules as
+your project, folded into the tokenizer, n-gram, embeddings and index, and every
+path from it is prefixed `@name/` so a borrowed hit is never mistaken for one of
+yours:
+
+```
+$ pca search "exponential backoff jitter"
+@backoff-lib/src/backoff1.ts:1 retryWithBackoff1
+```
+
+Three things stay deliberately project-only:
+
+- **The style profile.** The completer imitates it — quote style, indent width,
+  semicolons — so letting a borrowed repo vote would make the assistant write
+  like someone else inside your own files.
+- **The validation split.** The question `pca eval` answers is how well the
+  model predicts *your* code. Scoring it on someone else's would answer a
+  different question and flatter the result.
+- **Corpus priority.** Under the token cap the order is memory, then your code,
+  then borrowed code, so whatever has to be dropped is always the least specific
+  to you.
+
+**Pick sources you resemble.** Adding the Linux kernel to a TypeScript project
+makes the model worse, not better: it spends vocabulary and probability mass on
+patterns you will never type. The rule of thumb is that a source should look
+like code you could plausibly have written.
+
+### How long until it is useful — measured, not guessed
+
+`pca eval --curve` retrains the n-gram on growing slices of the corpus and
+scores every slice on the same held-out files. This is the only honest way to
+answer "would more data help", and the answer for this repository is:
+
+```
+$ pca eval --curve
+
+Does more code help? (n-gram retrained on slices of the corpus)
+  corpus    tokens   top-1   perplexity
+  13%       41,057   41.6%         23.5
+  25%       59,581   44.9%         18.1
+  50%       96,337   46.9%         15.2
+  100%     199,457   50.0%         11.8
+  last 2.1x of corpus bought 3.1 points of top-1
+
+  scaling  error ∝ tokens^-0.094  (r² 0.97)
+  projected 55.0% top-1 needs ~580k tokens (2.9x this corpus)
+  projected 60.0% top-1 needs ~2.0M tokens (10.1x this corpus)
+```
+
+Read the exponent, because it is the whole story: **0.094 is shallow.** Doubling
+the corpus cuts the error by about 6%, which is roughly three points of top-1 at
+this size. Going from 50% to 60% top-1 needs about **ten times** the code — call
+it five to ten more repositories the size of this one. That is achievable in an
+afternoon of `pca corpus add` if you have the repos, and it is not going to
+happen at all by waiting.
+
+So the timeline, in the only units that mean anything:
+
+| When | What works | What it took |
+|---|---|---|
+| **Immediately** | Inline completion of the next few tokens at ~4 ms; `pca search` over your whole codebase; `pca chat` answering "where is X" locally | one `pca train`, seconds |
+| **First session** | Claude answers the hard questions, grounded in your retrieved code; each answer is stored | an API key |
+| **After ~10 stored answers** | Repeat and paraphrased questions come back locally, instantly, offline | using `pca chat` normally |
+| **After adding 5–10 repos** | ~5–10 points of top-1, noticeably longer correct completions | `pca corpus add`, an afternoon |
+| **Never** | Writing a feature from a description; reasoning about code it has not seen | — that is what the Claude half is for, permanently |
+
+The honest summary: **the local half is useful on day one for the jobs a local
+model is good at, and it never becomes Claude.** What improves over weeks is not
+the model's intelligence — it is the fraction of *your* questions that have
+already been answered once and written down. That curve is measured too, by the
+leave-one-out routing number in the section above.
+
+The projection is a fit to four points on one machine. It is a planning number,
+not a promise, and the tool refuses to print it at all when the points do not
+lie on a line (r² below 0.8).
 
 ---
 
@@ -360,7 +485,23 @@ pca learn --minutes 10             # ... and continue the transformer for 10 min
 pca train --neural --minutes 10    # train the transformer for 10 minutes
 pca train --neural-only --resume   # continue training the transformer
 pca eval                           # measure quality on held-out files
+pca eval --curve                   # ... and whether more code would still help
+pca train --no-sources             # skip registered sources for one run
 ```
+
+### Feed it more code
+
+```bash
+pca corpus                         # the corpus, broken down by where it came from
+pca corpus add ../other-repo       # train on another directory too
+pca corpus add ~/src/lib --name lib --max-tokens 200000 --no-index
+pca corpus remove lib              # stop training on it
+```
+
+Sources are recorded in `.pca/sources.json`, which is plain JSON and safe to
+edit by hand. Changes take effect on the next `pca train` or `pca learn`. See
+[Feeding it](#feeding-it-what-to-train-on-and-how-long-until-it-helps) for which
+sources are worth adding and which make the model worse.
 
 `pca train` is fast enough to re-run whenever you like — a few seconds on a
 mid-size repo. `pca learn` is `pca train` plus the chat memory, and is the one
@@ -539,6 +680,10 @@ step of that came from measuring rather than guessing:
   loop are for.
 - **Whole-line completion from a mid-line cursor is ~0%** on this corpus. The
   model reliably finishes the *next few tokens*, not the rest of your thought.
+- **More data helps slowly.** Measured on this repository, top-1 error falls as
+  `tokens^-0.094`: a doubling of the corpus buys about three points. `pca corpus
+  add` is worth doing and will not transform the thing — see
+  [Feeding it](#feeding-it-what-to-train-on-and-how-long-until-it-helps).
 - **The transformer is small and slow to train** — see below.
 
 ---
@@ -732,8 +877,13 @@ Recorded because they were judgement calls, not requirements:
 - No KV cache in the transformer, so multi-token neural generation re-runs the
   forward pass per token. Fine for rescoring (one pass), too slow for neural
   free-generation.
-- No incremental re-indexing — `pca train` re-reads the whole project. At a few
-  seconds per run this has not been worth fixing.
+- No incremental re-indexing — `pca train` re-reads the whole project, and every
+  registered source with it. At a few seconds per run this has not been worth
+  fixing, but a source of a few million tokens would make it worth fixing.
+- **The learning curve only sweeps the n-gram.** It trains by counting, so four
+  slices cost about what one `pca train` costs. Sweeping the transformer would
+  take hours and answer a question nobody asked, so the projection describes the
+  model that actually serves inline completion and not the optional one.
 - VS Code is the only editor with a first-party client, though the daemon API is
   small enough that others are a short script.
 - The reranker learns from real usage, so a fresh install ranks with hand-set

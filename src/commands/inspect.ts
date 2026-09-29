@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import { Bundle } from "../core/bundle.js";
+import { loadSources } from "../core/sources.js";
 import { normalize } from "../ml/embeddings.js";
 import { retrievalQuery } from "../llm/prompts.js";
 import { hasCredentials } from "../llm/claude.js";
@@ -249,6 +251,19 @@ export async function cmdDoctor(): Promise<number> {
     "memory empty - `pca chat` fills it as you use the assistant",
     true,
   );
+  const sources = loadSources(ws);
+  check(
+    sources.length > 0,
+    `${sources.length} extra corpus source${sources.length === 1 ? "" : "s"}: ` +
+      sources.map((s) => `@${s.name}`).join(", "),
+    "training on this project only - `pca corpus add <dir>` feeds it more code",
+    true,
+  );
+  for (const source of sources) {
+    if (!fs.existsSync(source.path)) {
+      warn(`source @${source.name} points at a directory that is gone: ${source.path}`);
+    }
+  }
   info("");
   return 0;
 }
