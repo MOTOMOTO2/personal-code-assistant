@@ -53,15 +53,19 @@ export interface Snapshot {
   queued: Array<{ id: string; question: string }>;
 }
 
+/**
+ * Every event carries the id of the message it belongs to, so a client can tell
+ * its own turn from one a different device started in the same conversation.
+ */
 export type HubEvent =
   | { type: "snapshot"; snapshot: Snapshot }
-  | { type: "user"; message: Message; pendingId: string }
+  | { type: "user"; id: string; message: Message }
   | { type: "queued"; id: string; question: string }
-  | { type: "route"; route: Route; why: string; pClaude: number }
-  | { type: "thinking"; text: string }
-  | { type: "text"; text: string }
-  | { type: "done"; message: Message; lessonId: string | null; thread: ThreadMeta }
-  | { type: "error"; message: string }
+  | { type: "route"; id: string; route: Route; why: string; pClaude: number }
+  | { type: "thinking"; id: string; text: string }
+  | { type: "text"; id: string; text: string }
+  | { type: "done"; id: string; message: Message; lessonId: string | null; thread: ThreadMeta }
+  | { type: "error"; id: string; message: string }
   | { type: "thread"; thread: ThreadMeta };
 
 export interface SendOptions {
@@ -333,6 +337,9 @@ export class ChatHub {
       startedAt: new Date().toISOString(),
     };
     live.pending = pending;
+    // Pick up anything a terminal appended to this conversation while the daemon
+    // was idle, so the answer is grounded in the whole thread.
+    live.session.syncFromDisk();
 
     const askOptions = {
       force: job.opts.force ?? null,
@@ -343,19 +350,19 @@ export class ChatHub {
         pending.why = why;
         pending.pClaude = pClaude;
         pending.status = route === "claude" ? "thinking" : "streaming";
-        this.emit(id, { type: "route", route, why, pClaude });
+        this.emit(id, { type: "route", id: job.id, route, why, pClaude });
       },
       onThinking: (text: string) => {
         pending.thinking += text;
-        this.emit(id, { type: "thinking", text });
+        this.emit(id, { type: "thinking", id: job.id, text });
       },
       onText: (text: string) => {
         pending.text += text;
         pending.status = "streaming";
-        this.emit(id, { type: "text", text });
+        this.emit(id, { type: "text", id: job.id, text });
       },
       onUser: (turn: ChatTurn, seq: number) => {
-        this.emit(id, { type: "user", message: { ...turn, seq }, pendingId: job.id });
+        this.emit(id, { type: "user", id: job.id, message: { ...turn, seq } });
       },
     };
 
@@ -367,24 +374,24 @@ export class ChatHub {
         : await live.session.ask(job.question, askOptions);
       pending.status = "done";
       pending.text = result.text;
-      this.finish(id, live, result.lessonId);
+      this.finish(id, live, job.id, result.lessonId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       pending.status = "error";
       pending.error = message;
       live.pending = null;
-      this.emit(id, { type: "error", message });
+      this.emit(id, { type: "error", id: job.id, message });
       this.emit(id, { type: "thread", thread: this.metaOfLive(live) });
     }
   }
 
-  private finish(id: string, live: Live, lessonId: string | null): void {
+  private finish(id: string, live: Live, jobId: string, lessonId: string | null): void {
     const seq = live.session.turns.length - 1;
     const turn = live.session.turns[seq];
     live.pending = null;
     const thread = this.metaOfLive(live);
     if (turn) {
-      this.emit(id, { type: "done", message: { ...turn, seq }, lessonId, thread });
+      this.emit(id, { type: "done", id: jobId, message: { ...turn, seq }, lessonId, thread });
     }
     // A new lesson is knowledge for every conversation, not just this one.
     if (lessonId) {

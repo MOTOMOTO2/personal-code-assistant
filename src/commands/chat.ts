@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { Bundle } from "../core/bundle.js";
 import { ChatSession, Route } from "../chat/session.js";
+import { ThreadStore } from "../chat/threads.js";
 import { loadLessons } from "../chat/memory.js";
 import { trainProject } from "../core/train.js";
 import { Effort, hasCredentials } from "../llm/claude.js";
@@ -22,6 +23,7 @@ const HELP = `
     /local [question]    Force the local models
     /why                 How the last turn was routed, and on what evidence
     /memory [query]      What the assistant remembers about this codebase
+    /threads             Other conversations, here and on your phone
     /train               Fold new answers into the models and retrain
     /stats               Model sizes, router weights, session cost
     /new                 Start a fresh conversation
@@ -34,7 +36,7 @@ const VALID_EFFORT = new Set(["low", "medium", "high", "xhigh", "max"]);
 export async function cmdChat(args: ParsedArgs): Promise<number> {
   const ws = workspace(flagString(args, "root"));
   const bundle = new Bundle(ws);
-  const session = new ChatSession(bundle, { persist: !flagBool(args, "no-save") });
+  const session = openSession(bundle, args);
   const effortFlag = flagString(args, "effort");
   if (effortFlag && !VALID_EFFORT.has(effortFlag)) {
     throw new Error(`--effort must be one of: ${[...VALID_EFFORT].join(", ")}`);
@@ -45,13 +47,14 @@ export async function cmdChat(args: ParsedArgs): Promise<number> {
     forceDefault: flagBool(args, "local") ? ("local" as Route) : null,
   };
 
-  // `--local "question"` parses the question as the flag's value; treat it as
-  // the question rather than making the user remember flag order.
-  const localValue = args.flags.get("local");
+  // `--local "question"` and `--resume "question"` parse the question as the
+  // flag's value; treat it as the question rather than making the user remember
+  // flag order.
+  const valueFlags = ["local", "resume"].map((name) => args.flags.get(name));
   const oneShot = [
     ...args.positional,
     ...args.rest,
-    ...(typeof localValue === "string" ? [localValue] : []),
+    ...valueFlags.filter((v): v is string => typeof v === "string"),
   ]
     .join(" ")
     .trim();
@@ -254,6 +257,24 @@ async function slashCommand(
       return true;
     }
 
+    case "/threads": {
+      const threads = new ThreadStore(bundle.ws).list();
+      if (threads.length === 0) {
+        info("This is the only conversation so far.");
+        return true;
+      }
+      info(`${threads.length} conversation${threads.length === 1 ? "" : "s"}:`);
+      for (const thread of threads.slice(0, 8)) {
+        const mark = thread.id === session.id ? color.cyan("›") : " ";
+        info(
+          `  ${mark} ${color.bold(thread.id)} ${truncate(thread.title, 44)} ` +
+            color.dim(`(${thread.messages} messages)`),
+        );
+      }
+      info(color.dim("  pca chat --thread <id> continues one of these"));
+      return true;
+    }
+
     case "/new":
       session.clear();
       info("New conversation.");
@@ -289,6 +310,23 @@ async function escalate(session: ChatSession, opts: TurnOpts): Promise<void> {
   info(color.dim(`~$${result.costUsd.toFixed(4)} · the router learned from this`));
 }
 
+/**
+ * Which conversation this invocation is. Conversations live in `.pca/chat/`, so
+ * `--resume` continues whatever you were last saying - including from the browser
+ * client on your phone - and `--thread` picks one out by id.
+ */
+function openSession(bundle: Bundle, args: ParsedArgs): ChatSession {
+  const persist = !flagBool(args, "no-save");
+  const wanted = flagString(args, "thread");
+  if (wanted) return ChatSession.open(bundle, wanted, { persist });
+  if (flagBool(args, "resume")) {
+    const latest = new ThreadStore(bundle.ws).latest();
+    if (latest) return ChatSession.open(bundle, latest.id, { persist });
+    warn("No conversation to resume - starting a new one.");
+  }
+  return new ChatSession(bundle, { persist });
+}
+
 function banner(bundle: Bundle, session: ChatSession): void {
   const m = bundle.manifest;
   info(`${color.bold("pca chat")} ${color.dim("- local models first, Claude when it matters")}`);
@@ -297,6 +335,14 @@ function banner(bundle: Bundle, session: ChatSession): void {
       `  ${m ? `${m.corpusTokens.toLocaleString()} tokens trained` : "not trained yet - run `pca train`"} · ` +
         `${session.memorySize} answers in memory · ` +
         `${hasCredentials() ? "Claude available" : "no API key, local only"}`,
+    ),
+  );
+  if (session.turns.length > 0) {
+    info(color.dim(`  resuming "${session.title}", ${session.turns.length} messages so far`));
+  }
+  info(
+    color.dim(
+      `  conversation ${session.id} · continue it on your phone with \`pca phone\``,
     ),
   );
   info(color.dim("  /help for commands, /exit to leave\n"));

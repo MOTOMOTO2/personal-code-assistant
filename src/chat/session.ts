@@ -144,7 +144,34 @@ export class ChatSession {
     this.lessons = loadLessons(this.bundle);
   }
 
+  /**
+   * Adopt messages another process appended to this conversation.
+   *
+   * A conversation can have two writers: the daemon answering your phone, and a
+   * `pca chat --thread` in a terminal. Both hold the turns in memory and both
+   * write the whole file, so without this the second writer silently drops the
+   * first one's messages. Only a strict extension of what we already have is
+   * adopted - if the two have diverged, the in-memory copy wins, because it is
+   * the one with a turn possibly in flight.
+   */
+  syncFromDisk(): void {
+    // Never into an empty session: `/new` empties the turns without touching the
+    // file yet, and adopting there would undo it.
+    if (!this.persist || this.turns.length === 0) return;
+    const stored = this.threads.load(this.id);
+    if (!stored || stored.turns.length <= this.turns.length) return;
+    for (let i = 0; i < this.turns.length; i++) {
+      const mine = this.turns[i];
+      const theirs = stored.turns[i];
+      if (mine.role !== theirs.role || mine.content !== theirs.content || mine.at !== theirs.at) return;
+    }
+    this.turns.push(...stored.turns.slice(this.turns.length));
+    this.totalCostUsd = Math.max(this.totalCostUsd, stored.costUsd);
+    this.updatedAt = stored.updatedAt;
+  }
+
   async ask(question: string, opts: AskOptions = {}): Promise<AskResult> {
+    this.syncFromDisk();
     // Asking something new instead of retrying means the previous local answer
     // was good enough. Record that before the context is replaced.
     this.confirmLocalAnswer();
@@ -208,8 +235,13 @@ export class ChatSession {
       this.bundle.router.learn(ctx.features, 1);
       this.bundle.saveRouter();
     }
-    // Drop the local attempt so the transcript shows one answer per question.
-    if (this.turns.length > 0 && this.turns[this.turns.length - 1].role === "assistant") {
+    this.syncFromDisk();
+    // Drop the local attempt so the transcript shows one answer per question -
+    // but only if the tail really is that attempt. Another device may have added
+    // messages since, and theirs are not ours to remove.
+    const last = this.turns[this.turns.length - 1];
+    const previous = this.turns[this.turns.length - 2];
+    if (last?.role === "assistant" && previous?.role === "user" && previous.content === ctx.question) {
       this.turns.pop();
     }
     const result = await this.answerWithClaude(ctx, this.bundle.router.probability(ctx.features), opts);
@@ -361,6 +393,7 @@ export class ChatSession {
 
   clear(): void {
     this.turns.length = 0;
+    this.title = "New conversation";
     this.lastContext = null;
     this.lastRoute = null;
     this.lastAnsweredLocally = false;

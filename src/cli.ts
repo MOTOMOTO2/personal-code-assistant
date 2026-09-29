@@ -6,12 +6,13 @@ import { cmdLearn } from "./commands/learn.js";
 import { cmdDoctor, cmdNeighbors, cmdSearch, cmdStats } from "./commands/inspect.js";
 import { cmdAsk, cmdExplain, cmdRefactor, cmdReview } from "./commands/llm.js";
 import { cmdEval, cmdTrain } from "./commands/train.js";
-import { DEFAULT_PORT, createDaemon } from "./server/daemon.js";
+import { cmdPhone, cmdServe } from "./commands/serve.js";
+import { cmdThreads } from "./commands/threads.js";
+import { DEFAULT_PORT } from "./server/daemon.js";
 import { NotTrainedError } from "./core/bundle.js";
 import { MissingApiKeyError } from "./llm/claude.js";
-import { ParsedArgs, flagBool, flagNumber, flagString, parseArgs } from "./util/args.js";
+import { ParsedArgs, flagBool, parseArgs } from "./util/args.js";
 import { color, fail, setQuiet } from "./util/log.js";
-import { workspace } from "./util/paths.js";
 
 const VERSION = "0.1.0";
 
@@ -22,7 +23,14 @@ const HELP = `${color.bold("pca")} - personal code assistant ${color.dim(`v${VER
 ${color.bold("Chat")} ${color.dim("(routes each turn: local models first, Claude when it matters)")}
   pca chat                       Conversation in the terminal
   pca chat "where is the retry logic?"   One question, then exit
-  pca serve --ui                 Same chat in the browser
+  pca chat --resume              Continue the most recent conversation
+  pca chat --thread <id>         Continue a particular one
+  pca threads                    Every conversation, resumable from either side
+
+${color.bold("Message it from your phone")}
+  pca phone                      Serve the chat to this network, and print a QR code
+  pca serve --lan                The same thing; --host/--token to be explicit
+  pca serve --ui                 Browser chat, this machine only
 
 ${color.bold("Train")}
   pca train                      Train the fast models (tokenizer, n-gram, index, embeddings)
@@ -55,7 +63,7 @@ ${color.bold("Ask Claude")} ${color.dim("(needs ANTHROPIC_API_KEY)")}
   pca refactor src/auth.ts "extract the retry logic" [--write]
 
 ${color.bold("Editor integration")}
-  pca serve [--port ${DEFAULT_PORT}] [--ui]  Warm daemon for completion and chat
+  pca serve [--port ${DEFAULT_PORT}] [--ui] [--lan] [--token T]  Warm daemon for completion and chat
 
 ${color.bold("Common flags")}
   --neural        Include the transformer in scoring (slower, more context)
@@ -63,6 +71,7 @@ ${color.bold("Common flags")}
   --effort LEVEL  low|medium|high|xhigh|max for Claude commands
   --think         Stream a summary of Claude's reasoning
   --local         Keep a chat turn on the local models
+  --lan           Serve to this network (implies --ui, requires a token)
   --quiet         Suppress status output
   --help          Show this
 
@@ -82,33 +91,15 @@ const COMMANDS: Record<string, Handler> = {
   neighbors: cmdNeighbors,
   neighbours: cmdNeighbors,
   stats: cmdStats,
+  threads: cmdThreads,
   doctor: cmdDoctor,
   ask: cmdAsk,
   explain: cmdExplain,
   review: cmdReview,
   refactor: cmdRefactor,
   serve: cmdServe,
+  phone: cmdPhone,
 };
-
-async function cmdServe(args: ParsedArgs): Promise<number> {
-  const ws = workspace(flagString(args, "root"));
-  const daemon = createDaemon(ws, {
-    port: flagNumber(args, "port", DEFAULT_PORT),
-    idleTimeoutMs: flagNumber(args, "idle-timeout", 0),
-    ui: flagBool(args, "ui"),
-  });
-  await daemon.listen();
-  // Resolve only when the server closes, so the process stays up.
-  await new Promise<void>((resolve) => {
-    daemon.server.once("close", resolve);
-    const stop = () => {
-      void daemon.close();
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  });
-  return 0;
-}
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
