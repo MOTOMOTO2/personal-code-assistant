@@ -38,6 +38,27 @@ $ pca learn
 Ask that second question again next week and it is answered locally, in
 milliseconds, offline, for nothing.
 
+And you can message it the way you would message any assistant — from the sofa,
+on your phone, in a conversation that is still there tomorrow:
+
+```
+$ pca phone
+✓ pca daemon listening on http://0.0.0.0:7717
+
+  Open this on your phone (same Wi-Fi as this machine)
+    http://192.168.4.82:7717/?token=3f9c1e77a04b52d8
+
+  or scan:
+      ▄▄▄▄▄▄▄  ▄▀ ▄█ ▄▄▄▄▄▄▄
+      █ ▄▄▄ █ ▀█▄▀▄█ █ ▄▄▄ █      point a camera at the terminal
+      █ ███ █ █ ▄▀▄▀ █ ███ █      rather than typing the token
+      ▀▀▀▀▀▀▀ ▀ ▀ ▀▀ ▀▀▀▀▀▀▀
+```
+
+The conversation lives on the machine running `pca`, not in the page, so the
+answer keeps coming while your screen is off, the same thread opens on your
+laptop, and `pca chat --resume` picks it up in the terminal mid-sentence.
+
 ---
 
 ## Quickstart: using it right now
@@ -47,6 +68,13 @@ key and no network — the local half answers, and the banner says so. Add
 `ANTHROPIC_API_KEY` to turn on the Claude half, and the router starts sending the
 hard turns there. `node dist/cli.js serve --ui` puts the same chat in a browser
 at <http://127.0.0.1:7717>.
+
+**To message it from your phone:** `node dist/cli.js phone`, then scan the QR
+code it prints. That serves the chat to your local network behind a generated
+token, in a client built for a phone: conversations in a drawer, streamed
+answers, and one tap to hand a question to Claude. Both machines have to be on
+the same Wi-Fi — this is your network, not the internet. See [Message it from
+anywhere](#message-it-from-anywhere).
 
 **To let it read your other repos:** `node dist/cli.js corpus add-all "D:\Coding
 Projects" --dry-run`. That walks the directory, finds every project, scores each
@@ -67,6 +95,8 @@ until then, invoke it directly:
 node dist/cli.js doctor                       # confirm setup
 node dist/cli.js chat                         # the conversation, local + Claude
 node dist/cli.js chat "where are gradients clipped?"   # one question, then exit
+node dist/cli.js phone                        # message it from your phone
+node dist/cli.js threads                      # every conversation, resumable
 node dist/cli.js complete "const user = await db."
 node dist/cli.js search "where are gradients clipped"
 node dist/cli.js neighbors tokenizer
@@ -89,6 +119,7 @@ local half and says so. `doctor` tells you which half is live.
 
 For the browser version of the chat, `pca serve --ui` and open
 <http://127.0.0.1:7717>. Same models, same memory, same daemon the editor uses.
+`pca phone` is the same client, served to your network so a phone can reach it.
 
 To use it on a *different* project, `cd` there and run `pca train` — models are
 stored per-project in `.pca/`, so nothing is shared between codebases.
@@ -128,6 +159,110 @@ So the split is:
 The local half works with no API key and no network.
 
 ---
+
+---
+
+## Message it from anywhere
+
+The chat was already a conversation, but it was not something you could *message*.
+Two things were in the way, and both are now fixed.
+
+**The conversation did not exist as an object.** Every turn was written to disk,
+but the id was minted per process — and per browser page load — so closing a
+terminal or locking a phone lost the thread. Conversations are now first-class:
+listed, named, resumable, and shared by every surface.
+
+**A turn belonged to its HTTP request.** If the connection dropped, the answer
+dropped with it. Now the daemon owns the turn: you post a message, it answers in
+the background and writes the result to the conversation. Come back an hour later
+from a different device and a snapshot brings you up to date — finished answers
+whole, an in-flight one with the text it has produced so far.
+
+### Getting it onto your phone
+
+```bash
+pca phone                     # serve to this network, print the URL and a QR code
+pca serve --lan               # the same thing
+pca serve --lan --token hunter2   # bring your own token
+pca serve --host 192.168.4.82 --port 8080 --ui
+pca serve --ui                # loopback only, this machine
+```
+
+`pca phone` binds every interface, generates a token if you did not supply one,
+turns on the browser client, and prints the URL both as text and as a QR code you
+can scan off the terminal. Your phone and the machine running `pca` have to be on
+the same network. On the first run Windows may ask whether to allow Node through
+the firewall — that is the inbound rule your phone needs.
+
+Once it is open, **Add to Home Screen** installs it as its own app: there is a web
+manifest and an icon, and the token is stored both in the page and as a cookie, so
+a launch straight to `/` still authenticates.
+
+### What the client does
+
+- **Conversations in a drawer** — every thread in this project, newest first, with
+  the last message and where the last answer came from. New, rename, delete.
+- **Streamed answers**, with Claude's thinking summary above the reply when it is
+  reasoning, and a route badge, the router's reason and the cost under it.
+- **"Ask Claude instead"** under the newest local answer: one tap re-asks with
+  Claude, and teaches the router that it guessed wrong.
+- **Retrain from the phone** — the button that folds every remembered answer back
+  into the models, without getting up.
+- **It survives the phone being a phone.** The tab is frozen when you switch apps;
+  on wake it pulls a fresh snapshot and reattaches to the stream. Nothing is
+  rendered optimistically, so two devices in one conversation always agree.
+- Messages sent while it is still answering **queue** instead of interleaving.
+
+### The same conversation, from the terminal
+
+```bash
+pca threads                        # every conversation, newest first
+pca chat --resume                  # continue the most recent one
+pca chat --thread 20260929T0227-bb6fcc
+pca threads rename <id> "upload retries"
+pca threads rm <id>
+```
+
+Conversations are JSON in `.pca/chat/`, one file each, so the phone, the browser
+and the terminal are reading and writing the same thing. A session adopts messages
+another process appended rather than overwriting them, so a terminal and a phone
+can both be in one thread without either losing messages.
+
+### Security, stated plainly
+
+- **On loopback** (the default) there is no token and the `Host` header is
+  checked, which stops a public hostname resolving to `127.0.0.1` and a page on
+  that origin reaching the port.
+- **Off loopback a token is mandatory.** One is generated if you do not pass one;
+  every request needs it, in a header, the query string or the cookie. Comparison
+  is constant-time, and the cookie is `HttpOnly; SameSite=Strict`.
+- **It is plain HTTP.** Fine for a laptop and a phone on your own Wi-Fi. Do not
+  port-forward it: anyone who reaches the port and has the token can read every
+  conversation, and spend your API credit. To reach it from outside your network,
+  put it behind something that does authentication and TLS properly — Tailscale,
+  or `ssh -L 7717:127.0.0.1:7717` back to the loopback daemon.
+- `PCA_TOKEN` in the environment is picked up automatically, including on
+  loopback.
+
+### If you want to write your own client
+
+```
+GET    /api/state                      stats, threads, whether Claude is live
+GET    /api/threads                    conversations, newest first
+POST   /api/threads                    {title?} → a new conversation
+GET    /api/threads/:id                snapshot: messages + anything in flight
+PATCH  /api/threads/:id                {title}
+DELETE /api/threads/:id
+POST   /api/threads/:id/messages       {text, force?} → 202, answer via the stream
+POST   /api/threads/:id/escalate       re-answer the last question with Claude
+GET    /api/threads/:id/events         server-sent events for this conversation
+POST   /train                          retrain, folding in remembered answers
+```
+
+Events are one JSON object per `data:` frame: `snapshot`, `user`, `queued`,
+`route`, `thinking`, `text`, `done`, `error`, `thread`. Each carries the id of the
+message it belongs to, so you can tell your own turn from one another device
+started. Attach, replay the snapshot, apply the rest by `seq`.
 
 ## "so eventually I can use it just like Claude"
 
@@ -557,7 +692,11 @@ Run `pca doctor` to confirm everything is wired up.
 pca chat                                   # the conversation
 pca chat "where is the retry logic?"       # one question, then exit
 pca chat "explain the beam search" --effort max
+pca chat --resume                          # continue the most recent conversation
+pca chat --thread <id>                     # continue a particular one
+pca threads                                # every conversation, newest first
 pca serve --ui                             # the same chat in a browser
+pca phone                                  # the same chat on your phone
 echo "where is X?" | pca chat              # piped, one question per line
 ```
 
@@ -572,10 +711,13 @@ Inside the chat:
 | `/memory [query]` | What it remembers about this codebase |
 | `/train` | Fold new answers into the models, without leaving the chat |
 | `/stats` | Corpus, memory, router weights, session cost |
+| `/threads` | Other conversations, including ones started on your phone |
 | `/new` | Start a fresh conversation |
 
-Transcripts go to `.pca/chat/`, remembered answers to `.pca/lessons.jsonl`. Both
-are plain text you can read, grep, edit or delete.
+Conversations go to `.pca/chat/`, one JSON file each, and remembered answers to
+`.pca/lessons.jsonl`. Both are plain text you can read, grep, edit or delete — and
+because they are files, the terminal, the browser and your phone are all in the
+same conversation. See [Message it from anywhere](#message-it-from-anywhere).
 
 With no `ANTHROPIC_API_KEY` the chat still runs; every turn stays local and the
 banner says so.
@@ -844,7 +986,10 @@ pca complete  (2.3 ms warm)
   3 RANK     linear reranker over both model scores,
              locality, retrieval and embedding features   ~0.5 ms
 
-pca chat
+pca chat / pca phone / the browser client
+  0 ACCEPT   a message joins a conversation in .pca/chat/ and is
+             answered off the connection, so a locked phone keeps
+             its answer; every attached client streams it        instant
   1 GROUND   hybrid retrieval + memory recall, one pass, shared    ~3 ms
   2 ROUTE    logistic router over 10 features → local | claude
   3a LOCAL   replay a stored answer · locate code · complete · neighbours
@@ -864,11 +1009,13 @@ src/
   index/       walker · chunker · store (BM25 + vector + RRF)
   core/        bundle · train · trainNeural · complete · evaluate · style · watch
   chat/        memory (lesson store) · local answerer · session + routing
+               threads (conversations on disk) · hub (turns off the connection)
   llm/         claude client · prompt construction
-  server/      loopback daemon (completion, search, chat, train)
-  web/         the browser chat client, one self-contained page
+  server/      http daemon (completion, search, chat, conversations, train)
+  web/         the chat client, one self-contained page · QR encoder
   commands/    CLI command implementations
-test/          62 tests: gradient checks, round-trips, retrieval, chat, end-to-end
+test/          98 tests: gradient checks, round-trips, retrieval, chat,
+               messaging, QR decode, end-to-end
 bench/         latency, hyper-parameter sweeps
 editors/vscode inline-completion extension
 ```
@@ -919,7 +1066,7 @@ real index, not by the unit tests, which is why that case is now one.
 ## Testing
 
 ```bash
-npm test                              # 84 tests
+npm test                              # 98 tests
 node bench/latency.mjs                # warm-path latency distribution
 node bench/sweep.mjs                  # suggestion length / evidence sweep
 node bench/tune-locality.mjs          # locality weight sweep
@@ -949,6 +1096,25 @@ persists them, that the file watcher retrains on a genuine filesystem event, and
 that the daemon serves the UI, streams a turn, rejects a non-loopback `Host`,
 and retrains on request. The Claude path runs against an injected fake backend,
 so the whole suite passes offline with no API key.
+
+The messaging layer is tested for the properties that make it messaging rather
+than a web page: that a conversation reopened by id brings its turns back, that an
+answer completes and is persisted when nobody is listening, that a client
+attaching afterwards gets the finished thread, that two subscribers see the same
+event sequence, that a burst of messages is answered in order, that escalating
+replaces the local answer in place instead of appending, that an answer remembered
+in one conversation is recalled in another, and that ids arriving over HTTP cannot
+escape `.pca/chat/` — `../../evil` is rejected by the store, the hub and the
+daemon. Over real HTTP it checks the whole loop: create a conversation, attach to
+the event stream, post a message, and read `snapshot → user → route → done` off
+the wire.
+
+The QR encoder is tested by decoding its own output with an independent reader
+written in the test — re-walking the zigzag, unmasking, checking the Reed-Solomon
+syndrome and parsing the byte-mode segment — plus the structure a scanner looks
+for (finder patterns, separators, timing, alignment, dark module) and the spec's
+published format-information constant. Flipping three modules must show up as a
+non-zero syndrome, or the error correction would be decorative.
 
 ---
 
@@ -987,6 +1153,23 @@ Recorded because they were judgement calls, not requirements:
 - **Retrieval and memory are computed once per turn and shared** by the router,
   the local answerer and the Claude prompt. One index query per message, not
   three.
+- **"Something I can actually message" was read as: conversations that outlive the
+  process, reachable from a phone on your own network, with the answer owned by
+  the server rather than by the connection.** The alternatives were a hosted
+  service with accounts (not something to build for a single-user local tool, and
+  it would mean shipping your code off your machine) or a chat bridge into
+  Telegram or iMessage (a third party in the middle of your source code, and an
+  API key each). A token-protected LAN server is the conventional middle, and the
+  one that keeps everything on your hardware.
+- **Nothing in the client is rendered optimistically.** A message appears when the
+  server has accepted it, which costs a round trip on screen and buys the property
+  that two devices in one conversation never disagree.
+- **The QR encoder is byte mode, level L, versions 1 to 5.** That is 106 bytes —
+  an internal URL with a token is about 60 — and it stops before multi-block
+  interleaving and the version-information blocks, which are bookkeeping that
+  nothing at this size needs. Longer text falls back to printing the URL.
+- **One project per daemon.** `.pca/` is per-project, so `pca phone` serves the
+  conversations of the project it was started in. Two projects means two ports.
 
 ## Not built
 
@@ -1026,6 +1209,22 @@ Recorded because they were judgement calls, not requirements:
   for hundreds of answers. At tens of thousands it would want a real ANN index.
 - Chat has no tool use: it reads your codebase and answers, but it does not edit
   files. `pca refactor --write` is still the way to apply a change.
+- **No push notifications.** If you send a question and close the app, the answer
+  is waiting when you open it again, but nothing taps you on the shoulder. Doing
+  it properly needs a service worker, a VAPID key pair and a push endpoint that is
+  reachable from the internet, which is a different shape of project.
+- **No TLS and no access from outside your network.** The daemon speaks plain HTTP
+  and expects to be on your Wi-Fi. Anything beyond that should be someone else's
+  tunnel — Tailscale or `ssh -L` — rather than a certificate story invented here.
+- **The installed icon is an SVG.** Android and desktop Chrome use it; iOS wants a
+  PNG for the home screen and will fall back to a snapshot of the page. Generating
+  a PNG without an image dependency is possible but was not worth it for an icon.
+- **Conversations are never trimmed.** Every message goes to Claude as history on
+  a Claude turn, so a conversation running to hundreds of messages will get
+  expensive before it gets slow. Start a new one; the memory carries over, which
+  is the point.
+- **`pca phone` does not know your network changed.** The URL and QR code are
+  printed once at startup, so moving to a different Wi-Fi means restarting it.
 
 ## License
 

@@ -14,6 +14,8 @@ import { workspace } from "../util/paths.js";
  * than typing a 32-character secret with your thumbs.
  */
 
+const VALID_EFFORT = new Set(["low", "medium", "high", "xhigh", "max"]);
+
 export async function cmdServe(args: ParsedArgs): Promise<number> {
   const ws = workspace(flagString(args, "root"));
   const lan = flagBool(args, "lan");
@@ -22,6 +24,9 @@ export async function cmdServe(args: ParsedArgs): Promise<number> {
   // Reaching it from a phone is pointless without the client, so --lan implies it.
   const ui = flagBool(args, "ui", !loopback);
   const effort = flagString(args, "effort") as Effort | undefined;
+  if (effort && !VALID_EFFORT.has(effort)) {
+    throw new Error(`--effort must be one of: ${[...VALID_EFFORT].join(", ")}`);
+  }
 
   const daemon = createDaemon(ws, {
     port: flagNumber(args, "port", DEFAULT_PORT),

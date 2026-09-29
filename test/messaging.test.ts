@@ -92,8 +92,9 @@ function waitFor(
     const stop = hub.subscribe(id, (event) => {
       if (!want(event)) return;
       clearTimeout(timer);
-      // Unsubscribing inside the callback is allowed; the hub iterates a copy.
-      setTimeout(stop, 0);
+      // Unsubscribing from inside a callback is allowed; the hub delivers each
+      // event over a copy of its subscriber set.
+      stop();
       resolve(event);
     });
   });
@@ -338,6 +339,23 @@ test("an answer remembered in one conversation is available in the others", asyn
   assert.match(done.type === "done" ? done.message.content : "", /fourteen days/);
 });
 
+test("deleting a conversation mid-answer does not bring it back", async (t) => {
+  const bundle = setupProject(t);
+  const hub = new ChatHub(bundle, { backend: fakeBackend("An answer nobody is waiting for.") });
+  const thread = hub.create();
+  const store = new ThreadStore(bundle.ws);
+
+  hub.send(thread.id, "a question that is still being answered", { force: "claude" });
+  assert.equal(hub.remove(thread.id), true);
+  assert.equal(store.load(thread.id), null);
+
+  // The turn is already in flight and will finish; its final save must not
+  // recreate the file for the conversation that was just deleted.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(store.load(thread.id), null, "a deleted conversation must stay deleted");
+  assert.equal(store.list().length, 0);
+});
+
 test("the daemon serves conversations over HTTP, and streams one as it happens", async (t) => {
   const bundle = setupProject(t);
   const daemon = createDaemon(bundle.ws, { port: 0, ui: true });
@@ -469,6 +487,12 @@ test("off loopback, a token is mandatory and a cookie is enough to carry it", as
   assert.match(page.headers.get("set-cookie") ?? "", /pca_token=sekrit; Path=\/;.*HttpOnly/);
   assert.equal((await fetch(`${base}/`, { headers: { cookie: "pca_token=sekrit" } })).status, 200);
   assert.equal((await fetch(`${base}/`, { headers: { cookie: "pca_token=no" } })).status, 401);
+  // The web manifest and icon are fetched by the browser without credentials, so
+  // they must not be behind the token or the app cannot be installed.
+  assert.equal((await fetch(`${base}/manifest.webmanifest`)).status, 200);
+  assert.equal((await fetch(`${base}/icon.svg`)).status, 200);
+  assert.equal((await fetch(`${base}/health`)).status, 401, "everything else still needs it");
+
   // A plain loopback page load sets no cookie, because it needed no token.
   const plain = createDaemon(bundle.ws, { port: 0, ui: true });
   const plainPort = await plain.listen(0);

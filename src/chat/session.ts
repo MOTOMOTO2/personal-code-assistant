@@ -139,6 +139,15 @@ export class ChatSession {
     return this.lessons.size;
   }
 
+  /**
+   * Stop writing this conversation to disk. Used when it is deleted while a turn
+   * is still in flight: without this the turn's final save would recreate the
+   * file, and a conversation you deleted would come back.
+   */
+  disablePersistence(): void {
+    this.persist = false;
+  }
+
   /** Reload memory from disk - used after a retrain folds in new lessons. */
   refreshMemory(): void {
     this.lessons = loadLessons(this.bundle);

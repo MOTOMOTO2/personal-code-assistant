@@ -11,6 +11,8 @@ import { ARTIFACTS } from "../core/bundle.js";
 import { workspace } from "../util/paths.js";
 import { walkSources } from "../index/walker.js";
 import { loadLessons } from "../chat/memory.js";
+import { ThreadStore } from "../chat/threads.js";
+import { DEFAULT_PORT, lanAddresses } from "../server/daemon.js";
 
 export async function cmdSearch(args: ParsedArgs): Promise<number> {
   const ws = workspace();
@@ -263,6 +265,23 @@ export async function cmdDoctor(): Promise<number> {
     if (!fs.existsSync(source.path)) {
       warn(`source @${source.name} points at a directory that is gone: ${source.path}`);
     }
+  }
+
+  const threads = new ThreadStore(ws).list();
+  check(
+    threads.length > 0,
+    `${threads.length} conversation${threads.length === 1 ? "" : "s"} kept ` +
+      "(`pca threads`, `pca chat --resume`)",
+    "no conversations yet - `pca chat` starts one, `pca phone` opens it on your phone",
+    true,
+  );
+  const addresses = lanAddresses();
+  if (addresses.length > 0) {
+    info(
+      color.dim(
+        `  reachable from your phone at http://${addresses[0]}:${DEFAULT_PORT} once \`pca phone\` is running`,
+      ),
+    );
   }
   info("");
   return 0;

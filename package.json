@@ -1,7 +1,7 @@
 {
   "name": "personal-code-assistant",
   "version": "0.1.0",
-  "description": "A local, trainable ML coding assistant: from-scratch models that learn your codebase, a chat that routes between them and Claude, and training that folds every answer back in.",
+  "description": "A local, trainable ML coding assistant: from-scratch models that learn your codebase, a chat you can message from your phone, and training that folds every answer back in.",
   "type": "module",
   "bin": {
     "pca": "./dist/cli.js"
@@ -24,7 +24,9 @@
     "claude",
     "developer-tools",
     "chat",
-    "local-first"
+    "local-first",
+    "self-hosted",
+    "mobile"
   ],
   "license": "MIT",
   "dependencies": {

@@ -146,8 +146,13 @@ export function createDaemon(ws: Workspace, opts: DaemonOptions = {}) {
     // the editor and `fetch`, a query parameter for the first page load and for
     // EventSource (which cannot set headers), and a cookie so an installed
     // home-screen app that launches at "/" is not locked out.
+    // The manifest and the icon are exempt: a browser fetches a web manifest
+    // without credentials, so gating them would break "Add to Home Screen", and
+    // neither is secret.
+    const publicAsset =
+      method === "GET" && (url.pathname === "/manifest.webmanifest" || url.pathname === "/icon.svg");
     let authedByQuery = false;
-    if (token) {
+    if (token && !publicAsset) {
       const auth = req.headers.authorization ?? "";
       const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
       const query = url.searchParams.get("token") ?? "";

@@ -150,6 +150,9 @@ export class ChatHub {
   /** Forget a conversation. An in-flight turn is left to finish into the void. */
   remove(id: string): boolean {
     assertSafeThreadId(id);
+    const live = this.live.get(id);
+    // A turn still running would otherwise save the file back into existence.
+    if (live) live.session.disablePersistence();
     this.live.delete(id);
     return this.threads.remove(id);
   }
@@ -269,7 +272,9 @@ export class ChatHub {
   private emit(id: string, event: HubEvent): void {
     const live = this.live.get(id);
     if (!live) return;
-    for (const listener of live.subscribers) {
+    // A copy: a listener is allowed to unsubscribe (a closed socket does exactly
+    // that) while the event it was handed is still being delivered to the others.
+    for (const listener of [...live.subscribers]) {
       try {
         listener(event);
       } catch {
@@ -337,9 +342,6 @@ export class ChatHub {
       startedAt: new Date().toISOString(),
     };
     live.pending = pending;
-    // Pick up anything a terminal appended to this conversation while the daemon
-    // was idle, so the answer is grounded in the whole thread.
-    live.session.syncFromDisk();
 
     const askOptions = {
       force: job.opts.force ?? null,
