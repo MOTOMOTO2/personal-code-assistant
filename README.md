@@ -228,6 +228,28 @@ and the terminal are reading and writing the same thing. A session adopts messag
 another process appended rather than overwriting them, so a terminal and a phone
 can both be in one thread without either losing messages.
 
+### When you are not on the same Wi-Fi
+
+`--lan` is a local-network feature, and deliberately so: the daemon speaks plain
+HTTP, and a token in a URL is not a thing to expose to the internet. Two ways to
+reach it from outside without inventing a security story here, both keeping your
+code on your own machine:
+
+```bash
+# 1. A private network overlay (Tailscale, WireGuard). Bind the interface it
+#    gives you, and the printed URL and QR code work from anywhere you are
+#    signed in - no port forwarding, encrypted by the overlay.
+pca serve --host 100.101.102.103 --ui
+
+# 2. A tunnel back to the loopback daemon, from a machine you can already SSH to.
+pca serve --ui                                   # on the machine with your code
+ssh -L 7717:127.0.0.1:7717 you@your-machine      # from the other side
+```
+
+What not to do is forward port 7717 on your router. The token is the only thing
+between the internet and every conversation you have had with this project, plus
+your API credit.
+
 ### Security, stated plainly
 
 - **On loopback** (the default) there is no token and the `Host` header is
