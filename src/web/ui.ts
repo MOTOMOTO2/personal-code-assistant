@@ -717,13 +717,18 @@ const SCRIPT = `
   }
 
   (async function start() {
-    await refreshFacts();
-    var wanted = localStorage.getItem("pca.thread");
-    var exists = state.threads.some(function (t) { return t.id === wanted; });
-    if (exists) open(wanted);
-    else if (state.threads.length > 0) open(state.threads[0].id);
-    else await newThread();
-    if (!coarse) input.focus();
+    try {
+      await refreshFacts();
+      var wanted = localStorage.getItem("pca.thread");
+      var exists = state.threads.some(function (t) { return t.id === wanted; });
+      if (exists) open(wanted);
+      else if (state.threads.length > 0) open(state.threads[0].id);
+      else await newThread();
+      if (!coarse) input.focus();
+    } catch (e) {
+      // Most likely a stale token. Say so, rather than leaving a blank page.
+      banner("Could not start: " + e.message + " - reopen the link pca printed.");
+    }
   })();
 })();
 `;
