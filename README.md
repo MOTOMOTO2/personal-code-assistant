@@ -42,6 +42,23 @@ milliseconds, offline, for nothing.
 
 ## Quickstart: using it right now
 
+**To talk to it:** `node dist/cli.js chat`. That works this second, with no API
+key and no network — the local half answers, and the banner says so. Add
+`ANTHROPIC_API_KEY` to turn on the Claude half, and the router starts sending the
+hard turns there. `node dist/cli.js serve --ui` puts the same chat in a browser
+at <http://127.0.0.1:7717>.
+
+**To let it read your other repos:** `node dist/cli.js corpus add-all "D:\Coding
+Projects" --dry-run`. That walks the directory, finds every project, scores each
+one on how much of it is written in the languages *you* write, and prints what it
+would take and what it would skip. Drop `--dry-run` to register them, then
+`pca train`. One repo at a time is `pca corpus add <dir>`.
+
+Two honest limits on "read everything", both covered below: it learns from
+**tokens of code only** — not video, not screen recordings, not your Google Drive
+— and adding repositories in languages you never write makes completion
+*worse*, which is why `add-all` filters instead of taking everything.
+
 This repository is already built and already trained on itself, so the local
 half works immediately. The `pca` command is only on your PATH after `npm link`;
 until then, invoke it directly:
@@ -250,6 +267,7 @@ pca learn
 pca corpus scan ~/src                # what is nearby and what each would add
 pca corpus add ../my-other-project
 pca corpus add ~/src/some-library --max-tokens 200000
+pca corpus add-all ~/src             # every repo there that matches your languages
 pca corpus                           # see the whole corpus, broken down
 ```
 
@@ -298,6 +316,75 @@ Three things stay deliberately project-only:
 makes the model worse, not better: it spends vocabulary and probability mass on
 patterns you will never type. The rule of thumb is that a source should look
 like code you could plausibly have written.
+
+### "just read all of my repos"
+
+That is `pca corpus add-all <dir>`, and it applies the rule above for you rather
+than asking you to run `add` twenty times:
+
+```
+$ pca corpus add-all ~/src --dry-run
+
+Looking under /home/you/src
+  matching against your code: .ts 89%, .md 8%, .mjs 2%
+
+Would add 2 of 4 projects · budget 1,500,000 tokens
+  @web-dashboard           100% match     41 files     37,266 tokens
+    /home/you/src/web-dashboard
+    .ts 100%
+  @cli-tools               100% match     13 files      9,327 tokens
+    /home/you/src/cli-tools
+    .ts 100%
+
+Skipped 2
+  notes                    only ~481 tokens (--min-tokens)  [.md 100%]
+  scraper                  0% of it is in languages you write (--min-overlap)  [.py 100%]
+
+  corpus 194,747 → 241,340 tokens (1.2x) · next `pca train` ~5.4s
+
+  --dry-run: nothing was registered. Re-run without it to commit.
+```
+
+Three things in that output are the whole point of the command:
+
+**The match percentage** is the share of a repository's bytes written in
+languages that are a real part of your own code. It is deliberately asymmetric —
+the question is "is this the same shape as what I am about to type", not "are
+these two repos similar" — so a pure TypeScript library scores 100% against a
+TypeScript project, while a Python scraper scores 0 and is dropped. A language
+under 5% of your own code earns only partial credit, so one stray `.md` file
+cannot make every prose repository look like a match.
+
+**Every rejection is printed with its reason and the flag that would reverse
+it.** A filter you cannot see is a filter you cannot trust; if you disagree with
+one, `pca corpus add <dir>` takes it anyway.
+
+**The two numbers at the bottom are the cost.** How much bigger the corpus gets,
+and how long the next `pca train` will take — projected from the rate your own
+last train measured, not from a constant. `add-all` registers configuration and
+nothing else; training stays a separate, explicit step.
+
+| | |
+|---|---|
+| `--dry-run` | Show the plan, register nothing |
+| `--depth N` | How deep to look for projects (default 2) |
+| `--min-overlap F` | Reject repos less than this much in your languages (default 0.5) |
+| `--min-tokens N` | Reject repos smaller than this (default 5,000) |
+| `--budget N` | Tokens shared across everything added (default 1,500,000) |
+| `--max-tokens N` | Ceiling for any one repo (default 400,000) |
+| `--max-sources N` | Stop after this many (default 25) |
+
+The budget is shared out smallest-repository-first, so what a small one cannot
+use flows to the larger ones. Twenty repositories against the default budget
+each contribute their first ~75k tokens rather than three of them contributing
+everything: breadth first, because the point is to see a wide range of code you
+resemble. Raise `--budget` to buy depth instead. The ceiling exists because
+`pca train` caps the language-model corpus at 2M tokens and your own code has to
+fit inside that cap too.
+
+Undo any of it with `pca corpus remove <name>`, or edit `.pca/sources.json` by
+hand. Then `pca eval --curve` before and after is the only honest answer to
+whether the extra code helped.
 
 ### How long until it is useful — measured, not guessed
 
@@ -514,6 +601,8 @@ pca corpus                         # the corpus, broken down by where it came fr
 pca corpus scan ~/src              # nearby projects, and what each would add
 pca corpus add ../other-repo       # train on another directory too
 pca corpus add ~/src/lib --name lib --max-tokens 200000 --no-index
+pca corpus add-all ~/src --dry-run # every repo there worth having, as a preview
+pca corpus add-all ~/src           # ... and commit it
 pca corpus remove lib              # stop training on it
 ```
 
@@ -830,7 +919,7 @@ real index, not by the unit tests, which is why that case is now one.
 ## Testing
 
 ```bash
-npm test                              # 62 tests
+npm test                              # 84 tests
 node bench/latency.mjs                # warm-path latency distribution
 node bench/sweep.mjs                  # suggestion length / evidence sweep
 node bench/tune-locality.mjs          # locality weight sweep
@@ -841,6 +930,14 @@ on Unicode/CRLF/NUL/emoji, that Kneser-Ney distributions sum to 1 and never
 assign zero mass, save/load round-trips for every model, retrieval ranking, and
 an end-to-end test that trains a real temp project and drives the daemon over
 HTTP including auth rejection and malformed input.
+
+Corpus adoption is tested against real directory trees on disk: that language
+overlap is asymmetric and gives a trace language only partial credit, that a plan
+accepts the repositories in your languages and prints a reason for every one it
+skips, that the budget water-fills smallest-first and a per-source ceiling bites,
+that planned names stay unique so two repos called `shared` both survive, that a
+repository deleted between planning and committing costs only itself, and that
+committed sources really do reach the trained models.
 
 The chat layer is tested the same way, against a real trained fixture rather
 than mocks: that a remembered answer is recalled by a paraphrase *and not* by an
@@ -903,6 +1000,15 @@ Recorded because they were judgement calls, not requirements:
   slices cost about what one `pca train` costs. Sweeping the transformer would
   take hours and answer a question nobody asked, so the projection describes the
   model that actually serves inline completion and not the optional one.
+- **`corpus add-all` judges a repository by file extension, not by content.** It
+  can tell TypeScript from Python; it cannot tell idiomatic TypeScript from
+  TypeScript you would never write, and it cannot tell your own old code from a
+  vendored copy of someone else's. The match percentage is a language filter, and
+  `pca eval --curve` remains the only measurement of whether a source helped.
+- **`add-all` finds projects, not loose files.** A directory only counts if it
+  has a `.git`, `package.json`, `pyproject.toml`, `go.mod` or `Cargo.toml`, so a
+  folder of scripts with no project marker is invisible to it and needs
+  `pca corpus add` by hand.
 - VS Code is the only editor with a first-party client, though the daemon API is
   small enough that others are a short script.
 - The reranker learns from real usage, so a fresh install ranks with hand-set

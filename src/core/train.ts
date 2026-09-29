@@ -333,6 +333,7 @@ export function trainProject(bundle: Bundle, opts: TrainOptions = {}): TrainRepo
     corpusTokens,
     corpusFiles: trainIdx.length,
     embeddingDim: embeddingDimUsed,
+    trainSeconds: seconds,
     ...(bundle.manifest?.neural ? { neural: bundle.manifest.neural } : {}),
   };
   bundle.writeManifest(manifest);

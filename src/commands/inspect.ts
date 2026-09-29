@@ -256,7 +256,7 @@ export async function cmdDoctor(): Promise<number> {
     sources.length > 0,
     `${sources.length} extra corpus source${sources.length === 1 ? "" : "s"}: ` +
       sources.map((s) => `@${s.name}`).join(", "),
-    "training on this project only - `pca corpus add <dir>` feeds it more code",
+    "training on this project only - `pca corpus add-all <dir>` feeds it your other repos",
     true,
   );
   for (const source of sources) {

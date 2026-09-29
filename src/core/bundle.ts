@@ -36,6 +36,12 @@ export interface Manifest {
   corpusTokens: number;
   corpusFiles: number;
   embeddingDim: number;
+  /**
+   * Wall-clock seconds the last fast train took. Recorded so that adding code
+   * to the corpus can project what training it will cost from a rate measured
+   * on this machine, rather than from a constant baked in on someone else's.
+   */
+  trainSeconds?: number;
   /** Populated once the neural model has been trained at least once. */
   neural?: {
     trainedAt: string;

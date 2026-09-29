@@ -7,8 +7,13 @@ import { Bundle } from "../src/core/bundle.js";
 import { evalLearningCurve, fitScalingLaw } from "../src/core/evaluate.js";
 import {
   addSource,
+  commitAdoption,
   discoverProjects,
+  languageMix,
+  languageOverlap,
   loadSources,
+  planAdoption,
+  projectTrainSeconds,
   readSources,
   removeSource,
   sourceName,
@@ -309,4 +314,240 @@ test("fitting refuses to guess from a single point", () => {
     fitScalingLaw([{ fraction: 1, documents: 1, tokens: 100, perplexity: 5, top1: 0.5, top5: 0.8 }]),
     null,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Bulk adoption
+// ---------------------------------------------------------------------------
+
+/**
+ * A repository of `count` files in one language, each big enough that a handful
+ * of them clears a realistic token threshold.
+ */
+function writeRepo(root: string, ext: string, count: number, lines = 40): void {
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  for (let i = 0; i < count; i++) {
+    const body = Array.from(
+      { length: lines },
+      (_, n) => `  const value${n} = compute${n}(registry, "field${n}", ${n});`,
+    ).join("\n");
+    fs.writeFileSync(
+      path.join(root, "src", `module${i}${ext}`),
+      `function handler${i}(registry, request) {\n${body}\n  return registry;\n}\n`,
+    );
+  }
+}
+
+function tmp(t: { after(fn: () => void): void }, label: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pca-${label}-`));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test("language overlap is asymmetric: your languages, their bytes", () => {
+  const own = languageMix([
+    { abs: "/a/x.ts", rel: "x.ts", size: 900, mtimeMs: 0 },
+    { abs: "/a/r.md", rel: "r.md", size: 100, mtimeMs: 0 },
+  ]);
+
+  const sameLanguage = languageMix([{ abs: "/b/y.ts", rel: "y.ts", size: 500, mtimeMs: 0 }]);
+  assert.equal(languageOverlap(sameLanguage, own), 1, "pure TypeScript is a perfect match");
+
+  const otherLanguage = languageMix([{ abs: "/c/y.go", rel: "y.go", size: 500, mtimeMs: 0 }]);
+  assert.equal(languageOverlap(otherLanguage, own), 0, "a language you never write scores zero");
+
+  const half = languageMix([
+    { abs: "/d/y.ts", rel: "y.ts", size: 250, mtimeMs: 0 },
+    { abs: "/d/y.go", rel: "y.go", size: 250, mtimeMs: 0 },
+  ]);
+  assert.ok(Math.abs(languageOverlap(half, own) - 0.5) < 1e-9);
+
+  // A language that is a rounding error in your own code earns partial credit,
+  // so one stray file cannot make a whole foreign repository look like a match.
+  const trace = languageMix([
+    { abs: "/e/x.ts", rel: "x.ts", size: 9990, mtimeMs: 0 },
+    { abs: "/e/one.rb", rel: "one.rb", size: 10, mtimeMs: 0 },
+  ]);
+  const allRuby = languageMix([{ abs: "/f/y.rb", rel: "y.rb", size: 500, mtimeMs: 0 }]);
+  const partial = languageOverlap(allRuby, trace);
+  assert.ok(partial > 0 && partial < 0.05, `expected a small credit, got ${partial}`);
+
+  assert.equal(languageOverlap(sameLanguage, languageMix([])), 0, "nothing to match against");
+  assert.equal(languageOverlap(languageMix([]), own), 0, "nothing to match");
+});
+
+test("add-all plans only the repositories that look like your code", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "adopt");
+
+  writeRepo(path.join(tree, "mine-a"), ".ts", 8);
+  writeRepo(path.join(tree, "mine-b"), ".ts", 8);
+  writeRepo(path.join(tree, "theirs"), ".go", 8);
+  writeRepo(path.join(tree, "tiny"), ".ts", 1, 2);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 2000 });
+  const added = plan.add.map((c) => path.basename(c.path)).sort();
+  assert.deepEqual(added, ["mine-a", "mine-b"]);
+
+  const why = (name: string) =>
+    plan.skipped.find((c) => path.basename(c.path) === name)?.skip ?? "";
+  assert.match(why("theirs"), /languages you write/);
+  assert.match(why("tiny"), /tokens/);
+
+  // Every candidate is reported, accepted or not: a silent filter is the thing
+  // that makes bulk adoption untrustworthy.
+  assert.equal(plan.candidates.length, 4);
+  assert.equal(plan.add.length + plan.skipped.length, 4);
+  assert.ok(plan.tokens > 0);
+  assert.ok(plan.add.every((c) => c.budget > 0 && c.budget <= c.tokens));
+  // Ranked most-like-your-code first.
+  for (let i = 1; i < plan.candidates.length; i++) {
+    assert.ok(plan.candidates[i - 1].overlap >= plan.candidates[i].overlap);
+  }
+});
+
+test("committing a plan registers each repo with the budget it was planned at", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "commit");
+  writeRepo(path.join(tree, "alpha"), ".ts", 8);
+  writeRepo(path.join(tree, "beta"), ".ts", 8);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 500 });
+  assert.equal(plan.add.length, 2);
+
+  const { added, failed } = commitAdoption(bundle.ws, plan, "bulk");
+  assert.equal(failed.length, 0);
+  assert.equal(added.length, 2);
+
+  const registry = loadSources(bundle.ws);
+  assert.deepEqual(
+    registry.map((s) => s.name).sort(),
+    ["alpha", "beta"],
+  );
+  for (const planned of plan.add) {
+    const stored = registry.find((s) => s.name === planned.name);
+    assert.ok(stored, `${planned.name} should be registered`);
+    // Both of these fit the budget whole, so each is registered with headroom
+    // over the byte-based estimate rather than exactly at it.
+    assert.equal(planned.budget, planned.tokens);
+    assert.ok(stored!.maxTokens >= planned.budget, "an uncapped repo should not be clipped");
+    assert.equal(stored!.note, "bulk");
+  }
+
+  // And the adopted code really does reach the models.
+  bundle.reload();
+  const report = trainProject(bundle, { vocabSize: 1024, embeddingDim: 0, valFraction: 0 });
+  assert.equal(report.sources.length, 2);
+  assert.ok(report.sourceTokens > 0);
+
+  // Re-planning the same tree adds nothing twice.
+  const again = planAdoption(bundle.ws, tree, { minTokens: 500 });
+  assert.equal(again.add.length, 0);
+  assert.ok(again.skipped.every((c) => c.skip === "already in the corpus"));
+});
+
+test("the budget is shared out smallest-first, so breadth beats depth", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "budget");
+  writeRepo(path.join(tree, "big"), ".ts", 30);
+  writeRepo(path.join(tree, "small"), ".ts", 4, 6);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 100, budget: 4000 });
+  assert.equal(plan.add.length, 2);
+  assert.ok(plan.tokens <= 4000, `budget exceeded: ${plan.tokens}`);
+
+  const small = plan.add.find((c) => path.basename(c.path) === "small")!;
+  const big = plan.add.find((c) => path.basename(c.path) === "big")!;
+  // The small repo fits entirely; what it cannot use flows to the big one.
+  assert.equal(small.budget, small.tokens);
+  assert.ok(big.budget > 4000 / 2, `leftover should flow to the larger repo: ${big.budget}`);
+  assert.ok(big.budget < big.tokens, "the big repo should be the one that gets capped");
+
+  // A per-source ceiling bounds any single repository regardless of budget, and
+  // a repository the ceiling actually bit is registered at exactly that number.
+  const capped = planAdoption(bundle.ws, tree, {
+    minTokens: 100,
+    budget: 1_000_000,
+    maxPerSource: 1500,
+  });
+  assert.ok(capped.add.every((c) => c.budget <= 1500));
+  const { added } = commitAdoption(bundle.ws, capped);
+  const storedBig = added.find((s) => path.basename(s.path) === "big")!;
+  assert.equal(storedBig.maxTokens, 1500, "a capped source gets no headroom");
+});
+
+test("a budget too small to matter is refused rather than rounded down", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "starved");
+  writeRepo(path.join(tree, "alpha"), ".ts", 8);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 1000, budget: 10 });
+  assert.equal(plan.add.length, 0);
+  assert.match(plan.skipped[0].skip ?? "", /budget/);
+});
+
+test("max-sources bounds how many repositories one command can register", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "many");
+  for (const name of ["a", "b", "c", "d"]) writeRepo(path.join(tree, name), ".ts", 6);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 100, maxSources: 2 });
+  assert.equal(plan.add.length, 2);
+  assert.equal(plan.skipped.length, 2);
+  assert.ok(plan.skipped.every((c) => /--max-sources/.test(c.skip ?? "")));
+});
+
+test("planned names are unique, so two repos with one name both survive", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "collide");
+  writeRepo(path.join(tree, "one", "shared"), ".ts", 6);
+  writeRepo(path.join(tree, "two", "shared"), ".ts", 6);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 100, depth: 3 });
+  assert.equal(plan.add.length, 2);
+  assert.deepEqual(plan.add.map((c) => c.name).sort(), ["shared", "shared-2"]);
+
+  const { added, failed } = commitAdoption(bundle.ws, plan);
+  assert.equal(failed.length, 0, failed.map((f) => f.error).join("; "));
+  assert.equal(added.length, 2);
+});
+
+test("a repository that vanishes between plan and commit costs only itself", (t) => {
+  const { bundle } = setup(t);
+  const tree = tmp(t, "vanish");
+  writeRepo(path.join(tree, "here"), ".ts", 6);
+  writeRepo(path.join(tree, "gone"), ".ts", 6);
+
+  const plan = planAdoption(bundle.ws, tree, { minTokens: 100 });
+  assert.equal(plan.add.length, 2);
+  fs.rmSync(path.join(tree, "gone"), { recursive: true, force: true });
+
+  const { added, failed } = commitAdoption(bundle.ws, plan);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].name, "here");
+  assert.equal(failed.length, 1);
+  assert.match(failed[0].error, /No such directory/);
+});
+
+test("train time is projected from the rate the last train measured", (t) => {
+  const { bundle } = setup(t);
+  const report = trainProject(bundle, { vocabSize: 1024, embeddingDim: 0, valFraction: 0 });
+  bundle.reload();
+  const manifest = bundle.manifest!;
+  assert.ok(manifest.trainSeconds && manifest.trainSeconds > 0, "the rate should be recorded");
+  assert.ok(
+    Math.abs(manifest.trainSeconds! - report.seconds) < 1e-6,
+    "the manifest should hold what the report returned",
+  );
+
+  const rate = manifest.corpusTokens / manifest.trainSeconds!;
+  assert.ok(
+    projectTrainSeconds(2 * manifest.corpusTokens, rate) >
+      projectTrainSeconds(manifest.corpusTokens, rate),
+    "twice the corpus should project a longer train",
+  );
+  // With no measured rate, the fallback still produces a usable number.
+  assert.ok(projectTrainSeconds(90_000) > 0);
+  assert.equal(projectTrainSeconds(90_000, 0), projectTrainSeconds(90_000));
 });
