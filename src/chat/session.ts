@@ -1,11 +1,9 @@
-import fs from "node:fs";
-import path from "node:path";
 import { Bundle } from "../core/bundle.js";
 import { ClaudeClient, Effort, StreamOptions, StreamResult, hasCredentials } from "../llm/claude.js";
 import { renderContext, systemPrompt } from "../llm/prompts.js";
-import { statePath } from "../util/paths.js";
 import { LocalAssistant, TurnContext, buildTurnContext, isStrongRecall } from "./local.js";
 import { Lesson, LessonStore, appendLesson, extractCites, loadLessons, newLessonId } from "./memory.js";
+import { ThreadStore, newThreadId, titleFrom } from "./threads.js";
 
 /**
  * One conversation, and the thing that makes this feel like a chat assistant
@@ -31,6 +29,8 @@ export interface ChatTurn {
   costUsd?: number;
   /** Router probability that this turn needed Claude, at the time it was asked. */
   pClaude?: number;
+  /** Why the router chose that route, in the words the UI shows. */
+  why?: string;
 }
 
 /** The slice of the Claude client a session needs, so tests can substitute one. */
@@ -47,6 +47,13 @@ export interface AskOptions {
   onRoute?: (route: Route, pClaude: number, why: string) => void;
   onText?: (delta: string) => void;
   onThinking?: (delta: string) => void;
+  /**
+   * Fires the moment the question is recorded, before routing. The hub relays it
+   * to every attached client, so a message appears on your laptop as you send it
+   * from your phone - and a local answer, which is produced synchronously, does
+   * not race ahead of the message it answers.
+   */
+  onUser?: (turn: ChatTurn, seq: number) => void;
 }
 
 export interface AskResult {
@@ -69,10 +76,23 @@ const CHAT_ROLE = `You are answering inside an interactive chat session in the d
 - Earlier turns are real context; refer back to them rather than repeating yourself.
 - A <memory> block holds answers previously given about this same codebase. Treat it as your own prior work: build on it, and correct it explicitly if it is now wrong.`;
 
+export interface SessionOptions {
+  id?: string;
+  persist?: boolean;
+  client?: ChatBackend;
+  /** Continue the conversation already stored under this id, if there is one. */
+  resume?: boolean;
+  title?: string;
+}
+
 export class ChatSession {
   readonly bundle: Bundle;
   readonly id: string;
   readonly turns: ChatTurn[] = [];
+  readonly createdAt: string;
+  title: string;
+  updatedAt: string;
+  private threads: ThreadStore;
   private lessons: LessonStore;
   private local: LocalAssistant;
   private client: ChatBackend | null;
@@ -83,16 +103,36 @@ export class ChatSession {
   private lastAnsweredLocally = false;
   totalCostUsd = 0;
 
-  constructor(
-    bundle: Bundle,
-    opts: { id?: string; persist?: boolean; client?: ChatBackend } = {},
-  ) {
+  constructor(bundle: Bundle, opts: SessionOptions = {}) {
     this.bundle = bundle;
-    this.id = opts.id ?? new Date().toISOString().replace(/[:.]/g, "-");
+    this.id = opts.id ?? newThreadId();
     this.persist = opts.persist ?? true;
     this.client = opts.client ?? null;
+    this.threads = new ThreadStore(bundle.ws);
     this.lessons = loadLessons(bundle);
     this.local = new LocalAssistant(bundle);
+    this.title = opts.title ? titleFrom(opts.title) : "New conversation";
+    this.createdAt = new Date().toISOString();
+    this.updatedAt = this.createdAt;
+
+    // Resuming is what lets the same conversation be continued from the phone,
+    // the browser and the terminal - including after this process restarted.
+    // The turns are replayed into the Claude history, so context survives too.
+    if (opts.resume) {
+      const stored = this.threads.load(this.id);
+      if (stored) {
+        this.turns.push(...stored.turns);
+        this.title = stored.title;
+        this.createdAt = stored.createdAt;
+        this.updatedAt = stored.updatedAt;
+        this.totalCostUsd = stored.costUsd;
+      }
+    }
+  }
+
+  /** Open a stored conversation by id, or start one under that id. */
+  static open(bundle: Bundle, id: string, opts: Omit<SessionOptions, "id" | "resume"> = {}): ChatSession {
+    return new ChatSession(bundle, { ...opts, id, resume: true });
   }
 
   get memorySize(): number {
@@ -110,7 +150,12 @@ export class ChatSession {
     this.confirmLocalAnswer();
     const ctx = buildTurnContext(this.bundle, this.lessons, question);
     this.lastContext = ctx;
-    this.turns.push({ role: "user", content: question, at: new Date().toISOString() });
+    const hadTurns = this.turns.length > 0;
+    const userTurn: ChatTurn = { role: "user", content: question, at: new Date().toISOString() };
+    this.turns.push(userTurn);
+    // The opening message names the conversation, the way a chat app does.
+    if (!hadTurns && this.title === "New conversation") this.title = titleFrom(question);
+    opts.onUser?.(userTurn, this.turns.length - 1);
 
     const router = this.bundle.router;
     const pClaude = router.probability(ctx.features);
@@ -146,6 +191,7 @@ export class ChatSession {
       sources: result.sources,
       costUsd: result.costUsd,
       pClaude,
+      why,
     });
     this.save();
     return result;
@@ -175,6 +221,7 @@ export class ChatSession {
       kind: result.kind,
       sources: result.sources,
       costUsd: result.costUsd,
+      why: "you asked for Claude",
     });
     this.save();
     return result;
@@ -296,18 +343,20 @@ export class ChatSession {
   }
 
   transcriptPath(): string {
-    return statePath(this.bundle.ws, "chat", `${this.id}.json`);
+    return this.threads.file(this.id);
   }
 
   save(): void {
     if (!this.persist) return;
-    const file = this.transcriptPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ id: this.id, turns: this.turns, costUsd: this.totalCostUsd }, null, 2),
-      "utf8",
-    );
+    this.updatedAt = new Date().toISOString();
+    this.threads.save({
+      id: this.id,
+      title: this.title,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+      costUsd: this.totalCostUsd,
+      turns: this.turns,
+    });
   }
 
   clear(): void {
