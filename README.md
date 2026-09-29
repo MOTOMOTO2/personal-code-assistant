@@ -247,9 +247,27 @@ pca train
 pca learn
 
 # 3. Other people's code, in the languages you actually use.
+pca corpus scan ~/src                # what is nearby and what each would add
 pca corpus add ../my-other-project
 pca corpus add ~/src/some-library --max-tokens 200000
-pca corpus                          # see the whole corpus, broken down
+pca corpus                           # see the whole corpus, broken down
+```
+
+`pca corpus scan` is the place to start, because "add more code" is useless
+advice until you know what you have. It walks a directory looking for projects,
+measures each with the same walker training uses — so the token count is the
+real one — and prints the `add` command for each. It registers nothing: whether
+a codebase resembles yours closely enough to help is a judgement only you can
+make.
+
+```
+$ pca corpus scan ~/src
+
+Projects under /home/you/src
+  api-server                 412 files    1.9MB  ~560,000 tokens (2.9x this corpus)
+    pca corpus add "/home/you/src/api-server"
+  dashboard                  203 files    780KB  ~223,000 tokens (1.1x this corpus)
+    pca corpus add "/home/you/src/dashboard"
 ```
 
 The third is new, and it is the lever you control. A source is any directory
@@ -493,6 +511,7 @@ pca train --no-sources             # skip registered sources for one run
 
 ```bash
 pca corpus                         # the corpus, broken down by where it came from
+pca corpus scan ~/src              # nearby projects, and what each would add
 pca corpus add ../other-repo       # train on another directory too
 pca corpus add ~/src/lib --name lib --max-tokens 200000 --no-index
 pca corpus remove lib              # stop training on it

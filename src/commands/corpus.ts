@@ -3,6 +3,7 @@ import { Bundle } from "../core/bundle.js";
 import {
   DEFAULT_SOURCE_MAX_TOKENS,
   addSource,
+  discoverProjects,
   estimateTokens,
   loadSources,
   removeSource,
@@ -10,13 +11,14 @@ import {
 } from "../core/sources.js";
 import { LESSON_PATH_PREFIX } from "../chat/memory.js";
 import { ParsedArgs, flagBool, flagList, flagNumber, flagString } from "../util/args.js";
-import { color, info, ok, warn } from "../util/log.js";
+import { color, info, ok, progress, progressDone, warn } from "../util/log.js";
 import { humanBytes } from "../util/io.js";
 import { workspace } from "../util/paths.js";
 
 const USAGE = `${color.bold("pca corpus")} - what the local models train on
 
   pca corpus                       Show the corpus: this project, memory, sources
+  pca corpus scan <dir>            Find nearby projects worth training on
   pca corpus add <dir> [options]   Train on another directory as well
   pca corpus remove <name>         Stop training on it
   pca corpus list                  Registered sources only
@@ -41,6 +43,8 @@ export async function cmdCorpus(args: ParsedArgs): Promise<number> {
       return 0;
     case "list":
       return listSources();
+    case "scan":
+      return scanForProjects(args);
     case "add":
       return addCorpusSource(args);
     case "remove":
@@ -155,6 +159,57 @@ function printSources(sources: ReturnType<typeof loadSources>): void {
     );
     if (!source.index) info(`    ${color.dim("search")}    excluded (--no-index)`);
     if (source.note) info(`    ${color.dim("note")}      ${source.note}`);
+  }
+}
+
+/**
+ * Show what is nearby and what each would add. Registers nothing: whether a
+ * codebase resembles yours closely enough to help is a judgement call, and a
+ * heuristic that made it for you would quietly make the model worse.
+ */
+function scanForProjects(args: ParsedArgs): number {
+  const dir = args.positional[1] ?? "..";
+  const ws = workspace();
+  const found = discoverProjects(ws, dir, flagNumber(args, "depth", 2), (msg) => progress(msg));
+  progressDone();
+
+  if (found.length === 0) {
+    info(color.dim(`No projects found under ${path.resolve(dir)}. Try --depth 3.`));
+    return 0;
+  }
+
+  const current = bundleTokens();
+  info("");
+  info(color.bold(`Projects under ${path.resolve(dir)}`));
+  for (const p of found) {
+    const tokens = estimateTokens(p.bytes);
+    const ratio = current > 0 ? tokens / current : 0;
+    const share =
+      current === 0 ? "" : ratio < 0.1 ? " (<0.1x this corpus)" : ` (${ratio.toFixed(1)}x this corpus)`;
+    const tag = p.known ? color.dim("  already in the corpus") : "";
+    info(
+      `  ${color.cyan(path.basename(p.path).padEnd(24))} ${p.files.toString().padStart(5)} files  ` +
+        `${humanBytes(p.bytes).padStart(7)}  ~${tokens.toLocaleString()} tokens${share}${tag}`,
+    );
+    if (!p.known) info(`    ${color.dim(`pca corpus add "${p.path}"`)}`);
+  }
+  info("");
+  info(
+    color.dim(
+      "  Add the ones written in languages you use and in a style you would write.\n" +
+        "  A codebase unlike yours spends vocabulary on patterns you will never type,\n" +
+        "  which makes completion worse. `pca eval --curve` before and after tells you.",
+    ),
+  );
+  info("");
+  return 0;
+}
+
+function bundleTokens(): number {
+  try {
+    return new Bundle(workspace()).manifest?.corpusTokens ?? 0;
+  } catch {
+    return 0;
   }
 }
 

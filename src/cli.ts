@@ -35,6 +35,7 @@ ${color.bold("Train")}
 
 ${color.bold("Feed it")} ${color.dim("(what it learns from, beyond this project)")}
   pca corpus                     Where the corpus comes from, broken down
+  pca corpus scan ~/src          Nearby projects, and what each would add
   pca corpus add ../other-repo   Train on another directory too
   pca corpus remove other-repo   Stop training on it
 

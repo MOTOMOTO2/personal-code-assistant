@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SourceFile, readSource, walkSources } from "../index/walker.js";
+import { ALWAYS_SKIP_DIRS, SourceFile, readSource, walkSources } from "../index/walker.js";
 import { Workspace, ensureStateDir, statePath } from "../util/paths.js";
 import { warn } from "../util/log.js";
 
@@ -251,4 +251,72 @@ export function readSources(
 /** Estimated token count for a byte count, for pre-train reporting. */
 export function estimateTokens(bytes: number): number {
   return Math.round(bytes / BYTES_PER_TOKEN);
+}
+
+/** Markers that make a directory a project in its own right. */
+const PROJECT_MARKERS = [".git", "package.json", "pyproject.toml", "go.mod", "Cargo.toml"];
+
+export interface DiscoveredProject {
+  path: string;
+  /** The marker that identified it, for the "why is this here" column. */
+  marker: string;
+  files: number;
+  bytes: number;
+  /** Already registered as a source, or the project we are standing in. */
+  known: boolean;
+}
+
+/**
+ * Look for other projects near `dir` and report what each would contribute.
+ *
+ * "Add more code" is useless advice if you do not know what you have. This
+ * walks a directory tree looking for project markers, measures each candidate
+ * with the same walker that training uses - so the token estimate is the real
+ * one, not a guess from `du` - and registers nothing. Deciding stays manual:
+ * a source that does not look like code you write makes the model worse, and
+ * no heuristic here can judge that.
+ */
+export function discoverProjects(
+  ws: Workspace,
+  dir: string,
+  depth = 2,
+  onProgress?: (msg: string) => void,
+): DiscoveredProject[] {
+  const root = path.resolve(dir);
+  if (!fs.existsSync(root)) throw new Error(`No such directory: ${root}`);
+  const registered = new Set(loadSources(ws).map((s) => path.resolve(s.path)));
+  const self = path.resolve(ws.root);
+
+  const found: DiscoveredProject[] = [];
+  const visit = (current: string, level: number): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const marker = PROJECT_MARKERS.find((m) => entries.some((e) => e.name === m));
+    if (marker) {
+      onProgress?.(`measuring ${path.basename(current)}`);
+      const files = walkSources(current);
+      found.push({
+        path: current,
+        marker,
+        files: files.length,
+        bytes: files.reduce((a, f) => a + f.size, 0),
+        known: registered.has(current) || current === self,
+      });
+      // A project's subdirectories are part of it, not separate sources.
+      return;
+    }
+    if (level >= depth) return;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".") || ALWAYS_SKIP_DIRS.has(entry.name)) continue;
+      visit(path.join(current, entry.name), level + 1);
+    }
+  };
+  visit(root, 0);
+
+  return found.sort((a, b) => b.bytes - a.bytes);
 }

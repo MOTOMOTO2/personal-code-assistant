@@ -5,7 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import { Bundle } from "../src/core/bundle.js";
 import { evalLearningCurve, fitScalingLaw } from "../src/core/evaluate.js";
-import { addSource, loadSources, readSources, removeSource, sourceName } from "../src/core/sources.js";
+import {
+  addSource,
+  discoverProjects,
+  loadSources,
+  readSources,
+  removeSource,
+  sourceName,
+} from "../src/core/sources.js";
 import { loadCorpus, trainProject } from "../src/core/train.js";
 import { setQuiet } from "../src/util/log.js";
 import { workspace } from "../src/util/paths.js";
@@ -175,6 +182,61 @@ test("source names are slugged into safe path prefixes", () => {
   assert.equal(sourceName("/tmp/My Project"), "my-project");
   assert.equal(sourceName("/tmp/react-dom"), "react-dom");
   assert.equal(sourceName("/tmp/@scope"), "scope");
+});
+
+test("scanning finds nearby projects and marks the ones already in the corpus", (t) => {
+  const { bundle, lib } = setup(t);
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "pca-scan-"));
+  t.after(() => fs.rmSync(tree, { recursive: true, force: true }));
+
+  // Two projects at depth 1, one at depth 2, one directory that is not a
+  // project at all, and a subdirectory *inside* a project that must not be
+  // reported separately.
+  for (const name of ["alpha", "beta"]) {
+    fs.mkdirSync(path.join(tree, name, "src"), { recursive: true });
+    fs.writeFileSync(path.join(tree, name, "package.json"), "{}");
+    fs.writeFileSync(path.join(tree, name, "src", "index.ts"), `export const ${name} = 1;\n`);
+  }
+  fs.mkdirSync(path.join(tree, "alpha", "packages", "inner"), { recursive: true });
+  fs.writeFileSync(path.join(tree, "alpha", "packages", "inner", "package.json"), "{}");
+  fs.mkdirSync(path.join(tree, "nested", "gamma", ".git"), { recursive: true });
+  fs.writeFileSync(path.join(tree, "nested", "gamma", "main.go"), "package main\n");
+  fs.mkdirSync(path.join(tree, "plain", "notes"), { recursive: true });
+  fs.writeFileSync(path.join(tree, "plain", "notes", "todo.txt"), "not code\n");
+
+  const found = discoverProjects(bundle.ws, tree, 2);
+  const names = found.map((p) => path.basename(p.path)).sort();
+  assert.deepEqual(names, ["alpha", "beta", "gamma"]);
+  assert.ok(
+    !found.some((p) => p.path.includes(`alpha${path.sep}packages`)),
+    "a package inside a project is part of it, not a separate source",
+  );
+  assert.ok(found.every((p) => p.files > 0 || path.basename(p.path) === "gamma"));
+
+  // Sorted largest first, so the most valuable addition is at the top.
+  for (let i = 1; i < found.length; i++) {
+    assert.ok(found[i - 1].bytes >= found[i].bytes, "results should be sorted by size");
+  }
+
+  // Registered sources and the project itself are flagged, not hidden.
+  addSource(bundle.ws, path.join(tree, "alpha"), { name: "alpha" });
+  const again = discoverProjects(bundle.ws, tree, 2);
+  assert.equal(again.find((p) => path.basename(p.path) === "alpha")!.known, true);
+  assert.equal(again.find((p) => path.basename(p.path) === "beta")!.known, false);
+
+  assert.throws(() => discoverProjects(bundle.ws, path.join(tree, "gone"), 2), /No such directory/);
+  assert.ok(lib.length > 0);
+});
+
+test("depth bounds how far the scan looks", (t) => {
+  const { bundle } = setup(t);
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "pca-depth-"));
+  t.after(() => fs.rmSync(tree, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(tree, "a", "b", "c", "deep"), { recursive: true });
+  fs.writeFileSync(path.join(tree, "a", "b", "c", "deep", "package.json"), "{}");
+
+  assert.equal(discoverProjects(bundle.ws, tree, 2).length, 0, "too deep to find at depth 2");
+  assert.equal(discoverProjects(bundle.ws, tree, 4).length, 1, "found at depth 4");
 });
 
 test("the learning curve is monotone in data and fits a power law", (t) => {
