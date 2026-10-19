@@ -202,7 +202,7 @@ export class LocalAssistant {
   private fromMemory(recall: Recall): LocalAnswer {
     const { lesson } = recall;
     const when = lesson.at.slice(0, 10);
-    const who = lesson.source === "claude" ? (lesson.model ?? "claude") : "the local models";
+    const who = lesson.source === "local" ? "the local models" : (lesson.model ?? lesson.source);
     return {
       text:
         `${lesson.answer.trim()}\n\n` +

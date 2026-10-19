@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { cmdAnswer } from "./commands/answer.js";
 import { cmdChat } from "./commands/chat.js";
 import { cmdComplete } from "./commands/complete.js";
 import { cmdCorpus } from "./commands/corpus.js";
@@ -11,6 +12,7 @@ import { cmdThreads } from "./commands/threads.js";
 import { DEFAULT_PORT } from "./server/daemon.js";
 import { NotTrainedError } from "./core/bundle.js";
 import { MissingApiKeyError } from "./llm/claude.js";
+import { LocalModelError } from "./llm/ollama.js";
 import { ParsedArgs, flagBool, parseArgs } from "./util/args.js";
 import { color, fail, setQuiet } from "./util/log.js";
 
@@ -28,6 +30,9 @@ ${color.bold("Chat")} ${color.dim("(routes each turn: local models first, Claude
   pca threads                    Every conversation, resumable from either side
 
 ${color.bold("Message it from your phone")}
+  pca answer "question"          Answer with the local model (Ollama) and its tools:
+                                 files, code index, web, and PCA_TOOLS. Reads
+                                 {"messages","prompt"} on stdin - the dashboard bridge runs this
   pca phone                      Serve the chat to this network, and print a QR code
   pca serve --lan                The same thing; --host/--token to be explicit
   pca serve --ui                 Browser chat, this machine only
@@ -81,6 +86,7 @@ ${color.dim("Everything trained is stored in .pca/ in your project. Add it to .g
 type Handler = (args: ParsedArgs) => Promise<number>;
 
 const COMMANDS: Record<string, Handler> = {
+  answer: cmdAnswer,
   chat: cmdChat,
   train: cmdTrain,
   learn: cmdLearn,
@@ -137,7 +143,7 @@ main()
     process.exitCode = code;
   })
   .catch((err: unknown) => {
-    if (err instanceof NotTrainedError || err instanceof MissingApiKeyError) {
+    if (err instanceof NotTrainedError || err instanceof MissingApiKeyError || err instanceof LocalModelError) {
       // These are expected setup states, not crashes - no stack trace.
       fail(err.message);
     } else if (err instanceof Error) {

@@ -26,7 +26,8 @@ import { Tokenizer } from "../tokenizer/tokenizer.js";
  * and must not be able to corrupt earlier turns.
  */
 
-export type LessonSource = "claude" | "local";
+/** `model` is the local language model under Ollama; `local` is the from-scratch models. */
+export type LessonSource = "claude" | "model" | "local";
 
 export interface Lesson {
   id: string;
@@ -198,7 +199,7 @@ export class LessonStore {
 export const LESSON_PATH_PREFIX = "~memory/";
 
 export function renderLesson(lesson: Lesson): string {
-  const header = lesson.source === "claude" ? `Answered by ${lesson.model ?? "claude"}` : "Answered locally";
+  const header = lesson.source === "local" ? "Answered locally" : `Answered by ${lesson.model ?? lesson.source}`;
   return `# ${lesson.question}\n\n<!-- ${header} on ${lesson.at} -->\n\n${lesson.answer}\n`;
 }
 

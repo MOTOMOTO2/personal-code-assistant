@@ -155,10 +155,63 @@ So the split is:
 | Deciding which of the two answers | Local online router | Learns from your corrections |
 | "Why does this break?", review, refactor | Claude Opus 5 | Needs real reasoning |
 | Learning your preferences | Local online ranker | Trains on your accept/reject, instantly |
+| A conversation from your phone, with tools | An open model on your GPU (Ollama) | Reasons in prose; never leaves the PC |
 
 The local half works with no API key and no network.
 
 ---
+
+## Your own AI, with no cloud model: `pca answer`
+
+The from-scratch models above cannot hold a conversation — that is what 1.6M
+parameters buys. So the assistant your phone talks to is an **open-weights
+model running on your own GPU through [Ollama](https://ollama.com)**, with pca
+wrapped around it. No Claude, no API key, nothing sent anywhere but localhost.
+
+```bash
+ollama pull qwen3:8b                 # once: ~5 GB, fits an 8 GB card
+pca answer "what does my pi-smart-home-hub do?"
+echo '{"prompt":"what failed on my dashboard?"}' | pca answer
+```
+
+`qwen3:8b` thinks before it answers and can call tools. On an RTX 4060 it
+writes about 47 tokens a second, so a reply that looks something up takes
+10–30 seconds. Its tools:
+
+| Tool | What it reaches |
+|---|---|
+| `project_overview`, `list_files`, `search_files`, `read_file` | Everything under `PCA_PROJECTS_ROOT`, read-only. `.env`, keys and credential files are refused, and so is anything outside the root |
+| `search_code` | pca's own trained retrieval index, by meaning |
+| `web_search`, `fetch_page` | DuckDuckGo's results and the text of pages, with no key. Nothing on this machine or your network is fetched |
+| anything in `PCA_TOOLS` | A command that lists tools as JSON and runs them — the [claude-remote dashboard](https://github.com/MOTOMOTO2/claude-remote-dashboard) uses this to hand over its jobs, usage, and a way to queue a job |
+
+An 8B model is not Claude, and the code around it is written for what it gets
+wrong:
+
+- **It sometimes answers from imagination instead of looking.** Asked "who
+  are you, and what failed on my dashboard?", it once invented a job that
+  never existed. So when a question plainly needs the dashboard, or names one
+  of your projects, pca makes that call *before* asking the model, and the
+  model reasons over real data. A rule decides it, not the model.
+- **It repeats itself.** The same tool call with the same arguments is
+  answered from the first result, and after six rounds of looking it is told
+  to answer with what it has.
+- **Web pages can carry instructions.** Once an answer has read web content,
+  a tool that *acts* (queueing a job) refuses to run in that answer.
+- **A remembered guess becomes a fact.** An answer goes into memory — and
+  from there into training — only if it was grounded in your files or code,
+  rested on nothing live, and does not hedge.
+
+Configuration is environment variables, so the dashboard's bridge sets them
+in its `.env`: `PCA_MODEL` (default `qwen3:8b`), `PCA_PROJECTS_ROOT` (default:
+the folder pca sits in), `PCA_TOOLS`, `PCA_OWNER` and `ASSISTANT_NAME` (who it
+works for, and what it is called), `PCA_CONTEXT` (default 8192 tokens),
+`PCA_THINK=0` to skip the reasoning step, and `OLLAMA_HOST`. If Ollama is
+installed but not running, `pca answer` starts it. `pca doctor` says whether
+the model is ready.
+
+The Claude half described elsewhere in this README is still here, and still
+off without an `ANTHROPIC_API_KEY`. `pca answer` never touches it.
 
 ---
 

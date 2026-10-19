@@ -4,6 +4,7 @@ import { loadSources } from "../core/sources.js";
 import { normalize } from "../ml/embeddings.js";
 import { retrievalQuery } from "../llm/prompts.js";
 import { hasCredentials } from "../llm/claude.js";
+import { OllamaClient } from "../llm/ollama.js";
 import { ParsedArgs, flagBool, flagNumber } from "../util/args.js";
 import { color, info, ok, warn } from "../util/log.js";
 import { fileSizeSafe, humanBytes } from "../util/io.js";
@@ -243,6 +244,16 @@ export async function cmdDoctor(): Promise<number> {
     hasCredentials(),
     "Anthropic credentials found (Claude commands enabled)",
     "no ANTHROPIC_API_KEY - `ask`/`review`/`explain` disabled, everything local still works",
+    true,
+  );
+  const local = new OllamaClient();
+  const pulled = await local.installedModels();
+  check(
+    pulled !== null && OllamaClient.hasModel(pulled, local.model),
+    `local model ${local.model} ready in Ollama (\`pca answer\`, what your phone talks to)`,
+    pulled === null
+      ? `Ollama is not running at ${local.host} - \`pca answer\` needs it`
+      : `${local.model} is not downloaded - run \`ollama pull ${local.model}\``,
     true,
   );
   const memory = loadLessons(bundle);
