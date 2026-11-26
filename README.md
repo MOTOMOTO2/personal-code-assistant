@@ -183,7 +183,7 @@ writes about 47 tokens a second, so a reply that looks something up takes
 | `project_overview`, `list_files`, `search_files`, `read_file` | Everything under `PCA_PROJECTS_ROOT`, read-only. `.env`, keys and credential files are refused, and so is anything outside the root |
 | `search_code` | pca's own trained retrieval index, by meaning |
 | `web_search`, `fetch_page` | DuckDuckGo's results and the text of pages, with no key. Nothing on this machine or your network is fetched |
-| anything in `PCA_TOOLS` | A command that lists tools as JSON and runs them — the [claude-remote dashboard](https://github.com/MOTOMOTO2/claude-remote-dashboard) uses this to hand over its jobs, usage, and a way to queue a job |
+| anything in `PCA_TOOLS` | A command that lists tools as JSON and runs them — the [claude-remote dashboard](https://github.com/adenyadegar/claude-remote-dashboard) uses this to hand over its jobs, usage, and a way to queue a job |
 
 An 8B model is not Claude, and the code around it is written for what it gets
 wrong:
@@ -729,7 +729,7 @@ useful or quiet, and never confidently wrong.
 Requires Node.js 20 or newer. No Python, no CUDA, no build tools.
 
 ```bash
-git clone https://github.com/MOTOMOTO2/personal-code-assistant.git
+git clone https://github.com/adenyadegar/personal-code-assistant.git
 cd personal-code-assistant
 npm install
 npm run build
