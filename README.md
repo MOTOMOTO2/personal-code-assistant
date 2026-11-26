@@ -936,52 +936,57 @@ intended to be reachable off-host.
 
 ## Measured results
 
-On this repository (33 files, 97k tokens, 2.1 s to train), evaluated on
-held-out files the models never saw:
+On this repository (68 files, 300k tokens, 6.8 s to train), evaluated on three
+held-out files the models never saw. Re-measured on 26 Nov 2026:
 
 | Metric | Value |
 |---|---|
-| Next-token perplexity (n-gram) | **15.1** |
-| Next-token top-1 accuracy (n-gram) | **46.2%** |
-| Next-token top-5 accuracy (n-gram) | **70.5%** |
-| Suggestions fully correct | **36.9%** |
-| Characters saved per call | **2.2** |
-| Warm inference, mean / p95 | **2.3 ms / 4.7 ms** |
-| Model load, once per process | 70 ms |
+| Next-token perplexity (n-gram) | **10.6** |
+| Next-token top-1 accuracy (n-gram) | **52.1%** |
+| Next-token top-5 accuracy (n-gram) | **77.0%** |
+| Suggestions fully correct | **37.0%** |
+| Characters saved per call | **3.7** of 8.6 offered |
+| Line completion in `pca eval`, mean / p95 | **4.3 ms / 10.0 ms** |
+| Warm completion with retrieval (`bench/latency.mjs`), mean / p95 | 28.7 ms / 63.6 ms |
+| Model load, once per process | 149 ms |
 
 Reproduce with `pca eval`, `node bench/latency.mjs`, and `node bench/sweep.mjs`.
 
-**These numbers come from a small repository and a held-out split of only two
-files, so treat them as an order of magnitude rather than a precise figure.**
-They will improve on a larger corpus — more code means longer n-gram contexts
-actually match.
+**These numbers come from one repository and a held-out split of three files,
+so treat them as an order of magnitude rather than a precise figure.** They
+moved the right way as the repository grew (from 46.2% top-1 at 97k tokens to
+52.1% at 300k), which is what a count-based model should do: more code means
+longer contexts actually match.
 
 ### The transformer, after 5 minutes of training, loses to the n-gram
 
 This is the most important honest result in the project, so it gets its own
-table. Same held-out files, same positions:
+table. Same held-out files; the transformer and the blend are scored on 400
+tokens each, because every one needs a forward pass:
 
 | Model | Perplexity | top-1 | top-5 |
 |---|---|---|---|
-| n-gram (1 s to train) | **15.1** | **46.2%** | **70.5%** |
-| transformer (5 min to train) | 134.6 | 12.5% | 28.3% |
-| 50/50 blend | 25.3 | 38.3% | 61.7% |
+| n-gram (7 s to train) | **10.6** | **52.1%** | **77.0%** |
+| transformer (5 min to train) | 44.3 | 28.7% | 54.0% |
+| 50/50 blend | 14.5 | 44.8% | 74.3% |
 
-Five minutes at ~230 tokens/second is about 70k tokens of training — well under
-one epoch over a 120k-token corpus. The model is barely past its initialisation,
-and blending it in at equal weight actively *degrades* the n-gram.
+Five minutes at ~220 tokens/second is about 65k tokens of training, under a
+quarter of one epoch over a 300k-token corpus (1.2M parameters, validation
+perplexity 45). The model is barely past its initialisation, and blending it in
+at equal weight still *degrades* the n-gram, though by less than it did on the
+smaller corpus (top-1 28.7% against 12.5% before).
 
 This is why neural rescoring is **off by default** (`--neural` is opt-in), and why
 `pca train --neural` prints a validation perplexity: the number tells you whether
 the model is earning its place yet. Expect to need a substantially larger budget
-— hours, not minutes — before the blend beats the n-gram on a corpus this size.
+(hours, not minutes) before the blend beats the n-gram on a corpus this size.
 If the transformer is losing on your corpus, leave it off; the n-gram plus the
 learned reranker is the configuration that produced every other number here.
 
 ### The eval harness earned its keep
 
-"Suggestions fully correct" started at **6.4%** and ended at **36.9%**, and every
-step of that came from measuring rather than guessing:
+"Suggestions fully correct" started at **6.4%** and ended at **36.9%** (37.0% on
+today's larger corpus), and every step of that came from measuring rather than guessing:
 
 - **Ranking on mean log-probability made long and short candidates look equally
   good**, so the engine over-offered — 15.8 characters per suggestion with only
